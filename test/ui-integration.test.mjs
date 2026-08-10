@@ -132,6 +132,146 @@ function api(window) {
   return window.__CODEX_SESSION_GROUPS_V1__;
 }
 
+test("native project menu gets one owned folder-plus item across refresh and remount", async () => {
+  const emptyState = { version: 1, projects: {} };
+  const started = boot([], [], { state: emptyState, showAll: "true" });
+  const { window, projectRow } = started;
+  const menuId = "native-project-menu";
+  const trigger = window.document.createElement("button");
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-controls", menuId);
+  trigger.setAttribute("aria-expanded", "true");
+  trigger.setAttribute("data-state", "open");
+  projectRow.appendChild(trigger);
+
+  let nativeClicks = 0;
+  const makeNativeMenu = ({ structured = true } = {}) => {
+    const menu = window.document.createElement("div");
+    menu.id = menuId;
+    menu.setAttribute("role", "menu");
+    const editItem = window.document.createElement("div");
+    editItem.className = "native-menu-item group";
+    editItem.setAttribute("role", "menuitem");
+    if (structured) {
+      const content = window.document.createElement("div");
+      content.className = "flex w-full items-center gap-1.5";
+      const icon = window.document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute(
+        "class",
+        "icon-xs shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100",
+      );
+      const label = window.document.createElement("span");
+      label.className = "flex-1 min-w-0 truncate";
+      label.textContent = "编辑项目";
+      content.append(icon, label);
+      editItem.appendChild(content);
+    } else {
+      editItem.textContent = "编辑项目";
+    }
+    editItem.addEventListener("click", () => { nativeClicks += 1; });
+    menu.appendChild(editItem);
+    window.document.body.appendChild(menu);
+    return { menu, editItem };
+  };
+
+  const first = makeNativeMenu();
+  api(window).refresh();
+  await waitFor(() => first.menu.querySelector('[data-csg-create-group="true"]'));
+  const firstItem = first.menu.querySelector('[data-csg-create-group="true"]');
+  const firstContent = firstItem.firstElementChild;
+  const firstIcon = firstContent.children[0];
+  const firstLabel = firstContent.children[1];
+  assert.notEqual(firstItem, first.editItem);
+  assert.equal(firstItem.className, first.editItem.className);
+  assert.equal(firstItem.getAttribute("role"), "menuitem");
+  assert.equal(firstItem.hasAttribute("data-radix-collection-item"), true);
+  assert.equal(firstItem.tabIndex, -1);
+  assert.equal(firstContent.tagName, "DIV");
+  assert.equal(firstContent.className, "flex w-full items-center gap-1.5");
+  assert.equal(firstContent.children.length, 2);
+  assert.equal(firstIcon.tagName.toLowerCase(), "svg");
+  assert.equal(
+    firstIcon.getAttribute("class"),
+    "icon-xs shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100",
+  );
+  assert.equal(firstIcon.getAttribute("width"), "20");
+  assert.equal(firstIcon.getAttribute("height"), "20");
+  assert.equal(firstIcon.getAttribute("stroke"), "currentColor");
+  assert.equal(firstIcon.getAttribute("aria-hidden"), "true");
+  assert.equal(firstIcon.getAttribute("focusable"), "false");
+  assert.equal(firstIcon.hasAttribute("tabindex"), false);
+  assert.equal(firstIcon.querySelectorAll("path").length, 3);
+  assert.equal(firstLabel.tagName, "SPAN");
+  assert.equal(firstLabel.className, "flex-1 min-w-0 truncate");
+  assert.equal(firstLabel.textContent, "新建分组");
+  assert.equal(
+    firstItem.querySelectorAll('button,a[href],input,select,textarea,[tabindex]:not([tabindex="-1"])').length,
+    0,
+  );
+
+  const bubbledKeys = [];
+  const recordKey = (event) => bubbledKeys.push({ key: event.key, defaultPrevented: event.defaultPrevented });
+  window.document.addEventListener("keydown", recordKey);
+  for (const key of ["ArrowDown", "Escape"]) {
+    firstItem.dispatchEvent(new window.KeyboardEvent("keydown", {
+      key,
+      bubbles: true,
+      cancelable: true,
+    }));
+  }
+  window.document.removeEventListener("keydown", recordKey);
+  assert.deepEqual(bubbledKeys, [
+    { key: "ArrowDown", defaultPrevented: false },
+    { key: "Escape", defaultPrevented: false },
+  ]);
+
+  api(window).refresh();
+  api(window).refresh();
+  await delay(80);
+  assert.equal(first.menu.querySelectorAll('[data-csg-create-group="true"]').length, 1);
+  assert.equal(first.menu.querySelector('[data-csg-create-group="true"]'), firstItem);
+  assert.equal(firstItem.firstElementChild, firstContent);
+
+  first.menu.remove();
+  const remounted = makeNativeMenu({ structured: false });
+  api(window).refresh();
+  api(window).refresh();
+  await waitFor(() => remounted.menu.querySelector('[data-csg-create-group="true"]'));
+  const remountedItems = remounted.menu.querySelectorAll('[data-csg-create-group="true"]');
+  assert.equal(remountedItems.length, 1);
+  assert.equal(firstItem.isConnected, false);
+  assert.notEqual(remountedItems[0], firstItem);
+  assert.equal(remountedItems[0].firstElementChild.className, "flex w-full items-center gap-1.5");
+  assert.equal(
+    remountedItems[0].querySelector("svg").getAttribute("class"),
+    "icon-xs shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100",
+  );
+  assert.equal(remountedItems[0].querySelector("span").className, "flex-1 min-w-0 truncate");
+
+  remountedItems[0].querySelector("svg").dispatchEvent(new window.MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+  }));
+  await waitFor(() => api(window).getState().projects[projectId]?.groups.length === 1);
+  assert.equal(nativeClicks, 0);
+  await waitFor(() => started.stack.querySelector(".csg-name-input"));
+  const editor = started.stack.querySelector(".csg-name-input");
+  assert.ok(editor);
+  editor.dispatchEvent(new window.KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true,
+  }));
+  await waitFor(() => !api(window).getState().projects[projectId]);
+  assert.equal(Object.keys(api(window).getState().projects).length, 0);
+
+  api(window).destroy();
+  assert.equal(remounted.menu.querySelector('[data-csg-create-group="true"]'), null);
+  assert.equal(remounted.editItem.isConnected, true);
+  assert.deepEqual(JSON.parse(window.localStorage.getItem("codex-session-groups:v1")).projects, {});
+  window.close();
+});
+
 test("incomplete native rows fail open and recover when Codex loads them", async () => {
   const members = [descriptor("local:t1"), descriptor("local:t2"), descriptor("local:t3")];
   const { window, stack } = boot(members, [members[0]], { collapsed: true, showAll: "true" });
@@ -262,7 +402,7 @@ test("removing an external pinned member starts a new reveal chain without chang
       stack.appendChild(makeThreadWrapper(started.window, pinned));
     },
   });
-  await delay(120);
+  await started.window.happyDOM.waitUntilComplete();
   const storageBefore = started.window.localStorage.getItem("codex-session-groups:v1");
   assert.equal(clicks, 0);
   assert.equal(started.stack.querySelector(".csg-group-count")?.textContent, "1/2");
@@ -271,6 +411,7 @@ test("removing an external pinned member starts a new reveal chain without chang
     .find((row) => !started.list.contains(row))
     .closest('[role="listitem"]')
     .remove();
+  await started.window.happyDOM.waitUntilComplete();
   await waitFor(() => clicks === 1
     && started.stack.querySelector(".csg-group-count")?.textContent === "2");
 

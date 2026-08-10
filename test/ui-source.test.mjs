@@ -24,6 +24,19 @@ test("contains the agreed native-like interactions", () => {
   assert.match(source, /aria-expanded/);
 });
 
+test("builds an owned native-shaped create-group menu item with a static folder-plus icon", () => {
+  assert.match(source, /CREATE_GROUP_CONTENT_CLASS = "flex w-full items-center gap-1\.5"/);
+  assert.match(source, /CREATE_GROUP_ICON_CLASS = "icon-xs shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100"/);
+  assert.match(source, /CREATE_GROUP_LABEL_CLASS = "flex-1 min-w-0 truncate"/);
+  assert.match(source, /function nativeMenuContentClasses\(template\)/);
+  assert.match(source, /document\.createElementNS\(SVG_NAMESPACE, "svg"\)/);
+  assert.match(source, /stroke: "currentColor"/);
+  assert.match(source, /"aria-hidden": "true"/);
+  assert.match(source, /focusable: "false"/);
+  assert.match(source, /item\.appendChild\(createGroupMenuContent\(template\)\)/);
+  assert.doesNotMatch(source, /cloneNode/);
+});
+
 test("only removes visual membership after an explicit native archive disappears", () => {
   assert.match(source, /归档聊天\|archive chat/);
   assert.match(source, /scheduleArchiveReconciliation/);

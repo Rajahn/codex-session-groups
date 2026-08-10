@@ -5,7 +5,7 @@
   const MODEL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
   const STORAGE_KEY = "codex-session-groups:v1";
   const STYLE_ID = "codex-session-groups-style-v1";
-  const VERSION = "0.1.6";
+  const VERSION = "0.1.7";
   const PROJECT_ROW_SELECTOR = "[data-app-action-sidebar-project-row]";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_ROW_SELECTOR = "[data-app-action-sidebar-thread-id]";
@@ -14,6 +14,10 @@
   const ARCHIVE_LABEL_PATTERN = /^(?:归档聊天|archive chat)$/i;
   const SHOW_ALL_LABEL_PATTERN = /^(?:展开显示|show more|show all)$/i;
   const MAX_PROJECT_REVEAL_CLICKS = 8;
+  const CREATE_GROUP_CONTENT_CLASS = "flex w-full items-center gap-1.5";
+  const CREATE_GROUP_ICON_CLASS = "icon-xs shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100";
+  const CREATE_GROUP_LABEL_CLASS = "flex-1 min-w-0 truncate";
+  const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
   if (location.protocol !== "app:") return;
   const existing = globalThis[GLOBAL_KEY];
@@ -958,6 +962,63 @@
     trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
   }
 
+  function elementClassName(element, fallback) {
+    return element?.getAttribute?.("class")?.trim() || fallback;
+  }
+
+  function nativeMenuContentClasses(template) {
+    const firstChild = template?.firstElementChild;
+    const content = firstChild?.tagName?.toLowerCase() === "div" ? firstChild : null;
+    const directChildren = Array.from(content?.children || []);
+    const icon = directChildren.find((child) => child.tagName?.toLowerCase() === "svg");
+    const label = directChildren.find((child) => child.tagName?.toLowerCase() === "span");
+    return {
+      content: elementClassName(content, CREATE_GROUP_CONTENT_CLASS),
+      icon: elementClassName(icon, CREATE_GROUP_ICON_CLASS),
+      label: elementClassName(label, CREATE_GROUP_LABEL_CLASS),
+    };
+  }
+
+  function createFolderPlusIcon(className) {
+    const icon = document.createElementNS(SVG_NAMESPACE, "svg");
+    const attributes = {
+      width: "20",
+      height: "20",
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "2",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true",
+      focusable: "false",
+      class: className,
+    };
+    Object.entries(attributes).forEach(([name, value]) => icon.setAttribute(name, value));
+    for (const pathData of [
+      "M12 10v6",
+      "M9 13h6",
+      "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
+    ]) {
+      const path = document.createElementNS(SVG_NAMESPACE, "path");
+      path.setAttribute("d", pathData);
+      icon.appendChild(path);
+    }
+    return icon;
+  }
+
+  function createGroupMenuContent(template) {
+    const classes = nativeMenuContentClasses(template);
+    const content = document.createElement("div");
+    content.className = classes.content;
+    content.appendChild(createFolderPlusIcon(classes.icon));
+    const label = document.createElement("span");
+    label.className = classes.label;
+    label.textContent = "新建分组";
+    content.appendChild(label);
+    return content;
+  }
+
   function injectProjectMenuItems() {
     for (const row of projectRows()) {
       const trigger = nativeProjectMenuTrigger(row);
@@ -970,20 +1031,20 @@
       if (!menu?.matches?.('[role="menu"]')) continue;
       let item = menu.querySelector('[data-csg-create-group="true"]');
       if (!item) {
-        const template = menu.querySelector('[role="menuitem"]');
+        const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+        const editItem = items.find((candidate) => /编辑项目|edit project/i.test(candidate.textContent || ""));
+        const template = editItem || items[0] || null;
         item = document.createElement("div");
         item.dataset.csgCreateGroup = "true";
         item.setAttribute("role", "menuitem");
         item.setAttribute("data-radix-collection-item", "");
         item.tabIndex = -1;
         item.className = template?.className || "csg-menu-item";
-        item.textContent = "新建分组";
-        const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
-        const editItem = items.find((candidate) => /编辑项目|edit project/i.test(candidate.textContent || ""));
+        item.appendChild(createGroupMenuContent(template));
         if (editItem?.nextSibling) menu.insertBefore(item, editItem.nextSibling);
         else menu.appendChild(item);
       }
-      item.dataset.csgProjectId = projectId;
+      if (item.dataset.csgProjectId !== projectId) item.dataset.csgProjectId = projectId;
     }
   }
 

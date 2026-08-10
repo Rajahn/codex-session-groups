@@ -4,7 +4,8 @@ Updated: 2026-08-10
 
 ## Current
 
-- v0.1.6 is attached to the primary renderer: the verified API version changed from v0.1.5 before injection to v0.1.6 after injection. Implementation commit `08929c5` is pushed to the private personal `origin/main`.
+- v0.1.7 is attached to the primary renderer. Its owned “新建分组” item now uses the native menu's content/icon/label classes when available, with stable native-shaped fallbacks and a static non-focusable `currentColor` folder-plus SVG. The item remains independently created, keeps delegated clicks, and never clones native nodes or listeners.
+- v0.1.6 remains in release history at implementation commit `08929c5` on the private personal `origin/main`; the primary renderer has since been upgraded to v0.1.7.
 - Scope remains local-only visual groups: create, rename, delete, expand/collapse, and drag tasks into or out of a group. No task content, context, branch, Goal, archive state, or worktree is changed.
 - Persistence remains renderer `localStorage` under `codex-session-groups:v1`; runtime dependencies remain zero. `happy-dom` is dev-only for executable DOM lifecycle tests.
 - Earlier incident evidence: after the user removed the two temporary recovery pins, `质检分支实现` stalled at `1/3`. Codex's native task index still contained all three tasks under the same project and showed both recovered tasks as unpinned; the grouping `storageRaw` remained byte-identical at 3 groups, 5 memberships, and 5 thread hints.
@@ -17,9 +18,10 @@ Updated: 2026-08-10
 - Identity migration builds the complete source-target match graph before mutation. Already-grouped and outside-project/pinned matches remain ambiguity blockers; only a strict one-to-one eligible project target can migrate. Observed ambiguity is persisted per transient ID in `migrationBlocks`, so reducing candidates or restarting the renderer cannot turn a prior ambiguity into a later guess.
 - Prototype-key dictionaries are hardened with null-prototype maps so reserved IDs cannot corrupt state.
 - The v0.1.6 launcher requires exact v0.1.6 readback before recording an injection; per-target and debugger transport failures still retry without killing the watcher, and loopback target identity and port remain checked.
-- Automated verification: 64/64 checks pass. The reveal-state-machine baseline passed 62/62; the final suite adds observer regressions for native hidden/disabled controls becoming eligible and for non-form `[role="button"]` controls carrying `disabled`. Coverage includes stale-attribute multi-page reveal, same-page deduplication, strict ID progress, the 8-click cap, no-progress/regression/remount latches, unpin complete→incomplete restart, incomplete fail-open/recovery, archive/ID-migration orderings, durable ambiguity blocking, renderer cleanup, and launcher retries.
+- v0.1.7 automated verification: 66/66 checks pass. The added executable Happy DOM menu test covers copied class names, exact owned child structure, static SVG accessibility, absence of focusable descendants, keyboard-event pass-through, idempotent refresh, menu remount, delegated click/create/cancel with no saved group left behind, and destroy cleanup. Source assertions also forbid `cloneNode`. Existing coverage continues to include stale-attribute multi-page reveal, same-page deduplication, strict ID progress, the 8-click cap, no-progress/regression/remount latches, unpin complete→incomplete restart, incomplete fail-open/recovery, archive/ID-migration orderings, durable ambiguity blocking, renderer cleanup, and launcher retries. A final repeat run exposed one Happy DOM async-queue timeout in the unpin lifecycle test; the test now explicitly flushes the environment queue around that mutation, then passed 10/10 targeted runs and 3/3 complete-suite runs.
+- Isolated v0.1.7 menu verification passed against the live Codex DOM: the owned item inherited the native outer/content/icon/label classes, rendered a computed 16×16 icon with the native 6px content gap and 28.57px row height, and aligned with neighboring menu labels. The isolated grouping smoke also passed, then cleared both the test API and `codex-session-groups:v1`; isolated port 60893 closed while primary port 60789 remained alive.
 - Isolated v0.1.6 renderer smoke passed: a normal collapsed membership produced `collapsedHidden=true`; adding one missing saved member produced `1/2`, `incomplete=true`, and `expanded=true`, while the native row stayed visible and ungrouped (`nativeHidden=false`, `grouped=false`). Test storage and the injected API were cleared, isolated port 60892 closed, and the primary port 60789 remained alive.
-- Primary verification passed with byte-identical pre/post `storageRaw`: 3 groups, 4 memberships, and 4 thread hints. `质检分支实现` renders `2`; both member rows are connected, grouped, and `display: block`, with `hiddenCount=0` and `incomplete=false`. Delayed diagnostics reported `membershipChecks=0`.
+- Primary v0.1.7 verification passed with byte-identical pre/post `storageRaw`: the API changed from v0.1.6 to v0.1.7 while preserving 3 groups, 4 memberships, and 4 thread hints. `质检分支实现` renders `2`; all three groups are complete, `hiddenCount=0`, and delayed diagnostics reported `membershipChecks=0`. The live project menu independently confirmed the new icon's computed 16×16 size and native class/alignment.
 
 ## Constraints
 
@@ -32,5 +34,4 @@ Updated: 2026-08-10
 
 ## Next
 
-- Deployment and storage-preservation verification are complete; no further renderer injection or state migration is pending.
 - If a future Codex release changes semantic sidebar hooks, update selectors and rerun the isolated smoke test before attaching to the primary profile.

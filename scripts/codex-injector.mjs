@@ -10,7 +10,7 @@ const scriptPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(scriptPath), "..");
 const modelPath = path.join(projectRoot, "inject", "model.js");
 const uiPath = path.join(projectRoot, "inject", "session-groups.user.js");
-export const EXPECTED_UI_VERSION = "0.1.6";
+export const EXPECTED_UI_VERSION = "0.1.7";
 
 export function parseArgs(argv) {
   const options = {
