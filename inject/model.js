@@ -2,7 +2,7 @@
   "use strict";
 
   const GLOBAL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
-  const IMPLEMENTATION_VERSION = "0.1.5";
+  const IMPLEMENTATION_VERSION = "0.1.6";
   const VERSION = 1;
   const MAX_NAME_LENGTH = 60;
   const MAX_THREAD_TITLE_LENGTH = 500;

@@ -42,18 +42,35 @@ function makeThreadWrapper(window, thread, { archiveButton = false, pinned = fal
   return wrapper;
 }
 
-function makeProjectList(window, threads, { showAll = "true", onShowAll = null } = {}) {
+function makeProjectList(
+  window,
+  threads,
+  {
+    showAll = "true",
+    showAllControl = showAll === "false",
+    showAllDisabled = false,
+    showAllHidden = false,
+    showAllRoleButton = false,
+    onShowAll = null,
+  } = {},
+) {
   const list = window.document.createElement("div");
   list.setAttribute("data-app-action-sidebar-project-list-id", projectId);
   list.setAttribute("data-app-action-sidebar-project-show-all", showAll);
   const stack = window.document.createElement("div");
   stack.setAttribute("role", "list");
   threads.forEach((thread) => stack.appendChild(makeThreadWrapper(window, thread)));
-  if (showAll === "false") {
+  if (showAllControl) {
     const controlItem = window.document.createElement("div");
     controlItem.setAttribute("role", "listitem");
-    const control = window.document.createElement("button");
+    const control = window.document.createElement(showAllRoleButton ? "div" : "button");
+    if (showAllRoleButton) control.setAttribute("role", "button");
     control.textContent = "展开显示";
+    if (showAllDisabled) {
+      if ("disabled" in control) control.disabled = true;
+      else control.setAttribute("disabled", "");
+    }
+    control.hidden = showAllHidden;
     if (onShowAll) control.addEventListener("click", () => onShowAll({ list, stack, controlItem }));
     controlItem.appendChild(control);
     stack.appendChild(controlItem);
@@ -103,6 +120,9 @@ function boot(memberHints, visibleThreads, options = {}) {
     "codex-session-groups:v1",
     JSON.stringify(options.state || savedState(memberHints, options)),
   );
+  if (options.onDocumentClick) {
+    window.document.addEventListener("click", options.onDocumentClick);
+  }
   window.eval(modelSource);
   window.eval(uiSource);
   return { window, projectRow, ...made };
@@ -141,6 +161,408 @@ test("incomplete native rows fail open and recover when Codex loads them", async
 
   api(window).destroy();
   window.close();
+});
+
+test("a visible show-all control overrides a stale true attribute and is clicked once", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:missing-a"), descriptor("local:missing-b")];
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    onShowAll: ({ stack, controlItem }) => {
+      clicks += 1;
+      started.window.setTimeout(() => {
+        controlItem.remove();
+        stack.appendChild(makeThreadWrapper(started.window, members[1]));
+        stack.appendChild(makeThreadWrapper(started.window, members[2]));
+      }, 50);
+    },
+  });
+
+  await waitFor(() => clicks === 1);
+  started.stack.querySelector(".csg-group-row")?.click();
+  await waitFor(() => started.stack.querySelector(".csg-group-count")?.textContent === "3");
+  await delay(150);
+  assert.equal(clicks, 1);
+  assert.equal(started.stack.querySelector(".csg-group-row")?.getAttribute("data-csg-incomplete"), "false");
+  assert.equal(
+    started.stack.querySelector('[data-app-action-sidebar-thread-id="local:visible"]')
+      .closest('[role="listitem"]')
+      .getAttribute("data-csg-hidden"),
+    "true",
+  );
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("an unchanged visible show-all control is not clicked repeatedly", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:missing")];
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    onShowAll: () => { clicks += 1; },
+  });
+
+  await waitFor(() => clicks === 1);
+  started.stack.querySelector(".csg-group-row")?.click();
+  started.window.document.body.appendChild(started.window.document.createElement("div"));
+  await delay(500);
+  assert.equal(clicks, 1);
+  assert.equal(started.stack.querySelector(".csg-group-count")?.textContent, "1/2");
+  assert.equal(started.stack.querySelector(".csg-group-row")?.getAttribute("data-csg-incomplete"), "true");
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("a stale true attribute can page only while native thread ids strictly expand", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:page-two"), descriptor("local:page-three")];
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    onShowAll: ({ stack, controlItem }) => {
+      clicks += 1;
+      const page = clicks;
+      started.window.setTimeout(() => {
+        if (page === 1) {
+          stack.appendChild(makeThreadWrapper(started.window, members[1]));
+          return;
+        }
+        controlItem.remove();
+        stack.appendChild(makeThreadWrapper(started.window, members[2]));
+      }, 40);
+    },
+  });
+
+  await waitFor(() => clicks === 2
+    && started.stack.querySelector(".csg-group-count")?.textContent === "3");
+  await delay(250);
+  assert.equal(clicks, 2);
+  assert.equal(started.stack.querySelector(".csg-group-row")?.getAttribute("data-csg-incomplete"), "false");
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("removing an external pinned member starts a new reveal chain without changing storage", async () => {
+  const visible = descriptor("local:visible");
+  const pinned = descriptor("local:pinned");
+  let clicks = 0;
+  const started = boot([visible, pinned], [visible], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    externalThreads: [pinned],
+    onShowAll: ({ stack, controlItem }) => {
+      clicks += 1;
+      controlItem.remove();
+      stack.appendChild(makeThreadWrapper(started.window, pinned));
+    },
+  });
+  await delay(120);
+  const storageBefore = started.window.localStorage.getItem("codex-session-groups:v1");
+  assert.equal(clicks, 0);
+  assert.equal(started.stack.querySelector(".csg-group-count")?.textContent, "1/2");
+
+  Array.from(started.window.document.querySelectorAll('[data-app-action-sidebar-thread-id="local:pinned"]'))
+    .find((row) => !started.list.contains(row))
+    .closest('[role="listitem"]')
+    .remove();
+  await waitFor(() => clicks === 1
+    && started.stack.querySelector(".csg-group-count")?.textContent === "2");
+
+  assert.equal(clicks, 1);
+  assert.equal(started.window.localStorage.getItem("codex-session-groups:v1"), storageBefore);
+  assert.equal(Object.keys(api(started.window).getState().projects[projectId].membership).length, 2);
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("replacing native thread ids after a click halts reveal and stays fail-open", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:missing")];
+  const replacement = descriptor("local:replacement");
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    onShowAll: ({ stack }) => {
+      clicks += 1;
+      started.window.setTimeout(() => {
+        stack.querySelector('[data-app-action-sidebar-thread-id="local:visible"]')
+          .closest('[role="listitem"]')
+          .remove();
+        stack.prepend(makeThreadWrapper(started.window, replacement));
+      }, 40);
+    },
+  });
+
+  await waitFor(() => started.stack.querySelector('[data-app-action-sidebar-thread-id="local:replacement"]'));
+  started.stack.querySelector(".csg-group-row")?.click();
+  await delay(400);
+  assert.equal(clicks, 1);
+  assert.equal(started.stack.querySelector(".csg-group-count")?.textContent, "0/2");
+  assert.equal(started.stack.querySelector(".csg-group-row")?.getAttribute("data-csg-incomplete"), "true");
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("disabled and hidden show-all controls are never clicked", async () => {
+  for (const controlState of [{ showAllDisabled: true }, { showAllHidden: true }]) {
+    const members = [descriptor("local:visible"), descriptor("local:missing")];
+    let clicks = 0;
+    const started = boot(members, [members[0]], {
+      collapsed: true,
+      showAll: "true",
+      showAllControl: true,
+      ...controlState,
+      onShowAll: () => { clicks += 1; },
+    });
+    await delay(150);
+    assert.equal(clicks, 0);
+    assert.equal(started.stack.querySelector(".csg-group-row")?.getAttribute("data-csg-incomplete"), "true");
+    api(started.window).destroy();
+    started.window.close();
+  }
+});
+
+test("hidden or disabled native show-all controls become eligible when enabled in place", async () => {
+  for (const transition of [
+    { initial: { showAllHidden: true }, enable: (control) => { control.hidden = false; } },
+    { initial: { showAllDisabled: true }, enable: (control) => { control.disabled = false; } },
+  ]) {
+    const members = [descriptor("local:visible"), descriptor("local:missing")];
+    let clicks = 0;
+    const started = boot(members, [members[0]], {
+      collapsed: true,
+      showAll: "true",
+      showAllControl: true,
+      ...transition.initial,
+      onShowAll: ({ stack, controlItem }) => {
+        clicks += 1;
+        controlItem.remove();
+        stack.appendChild(makeThreadWrapper(started.window, members[1]));
+      },
+    });
+    await delay(150);
+    assert.equal(clicks, 0);
+
+    const control = Array.from(started.stack.querySelectorAll("button"))
+      .find((candidate) => candidate.textContent.trim() === "展开显示");
+    transition.enable(control);
+    await waitFor(() => clicks === 1
+      && started.stack.querySelector(".csg-group-count")?.textContent === "2");
+    await delay(150);
+    assert.equal(clicks, 1);
+    api(started.window).destroy();
+    started.window.close();
+  }
+});
+
+test("a disabled non-form role button is not clicked until its attribute is removed", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:role-button-missing")];
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    showAllDisabled: true,
+    showAllRoleButton: true,
+    onShowAll: ({ stack, controlItem }) => {
+      clicks += 1;
+      controlItem.remove();
+      stack.appendChild(makeThreadWrapper(started.window, members[1]));
+    },
+  });
+  await delay(150);
+  assert.equal(clicks, 0);
+
+  started.stack.querySelector("[role='button'][disabled]").removeAttribute("disabled");
+  await waitFor(() => clicks === 1
+    && started.stack.querySelector(".csg-group-count")?.textContent === "2");
+  await delay(150);
+  assert.equal(clicks, 1);
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("injected groups named like show-all controls never click themselves", async () => {
+  for (const injectedName of ["展开显示", "show all"]) {
+    const missing = descriptor(`local:missing-${injectedName}`);
+    const visible = descriptor(`local:visible-${injectedName}`);
+    const state = {
+      version: 1,
+      projects: {
+        [projectId]: {
+          groups: [
+            { id: "empty", name: injectedName, collapsed: false, createdAt: 1, updatedAt: 1 },
+            { id: "work", name: "Work", collapsed: false, createdAt: 2, updatedAt: 2 },
+          ],
+          membership: { [missing.id]: "work" },
+          threadHints: {
+            [missing.id]: { title: missing.title, hostId: missing.hostId, kind: missing.kind },
+          },
+        },
+      },
+    };
+    let injectedGroupClicks = 0;
+    const started = boot([], [visible], {
+      state,
+      showAll: "true",
+      showAllControl: false,
+      onDocumentClick: (event) => {
+        if (event.target.closest?.(".csg-group-row")) injectedGroupClicks += 1;
+      },
+    });
+    const storageBefore = started.window.localStorage.getItem("codex-session-groups:v1");
+    await delay(300);
+
+    assert.equal(injectedGroupClicks, 0);
+    assert.equal(started.window.document.querySelector(".csg-toast"), null);
+    assert.equal(started.window.localStorage.getItem("codex-session-groups:v1"), storageBefore);
+    api(started.window).destroy();
+    started.window.close();
+  }
+});
+
+test("a native show-all control appearing after the initial wait timeout remains eligible", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:slow-missing")];
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "false",
+    showAllControl: false,
+  });
+
+  await delay(2_300);
+  const controlItem = started.window.document.createElement("div");
+  controlItem.setAttribute("role", "listitem");
+  const control = started.window.document.createElement("button");
+  control.textContent = "展开显示";
+  control.addEventListener("click", () => {
+    clicks += 1;
+    controlItem.remove();
+    started.stack.appendChild(makeThreadWrapper(started.window, members[1]));
+  });
+  controlItem.appendChild(control);
+  started.stack.appendChild(controlItem);
+
+  await waitFor(() => clicks === 1
+    && started.stack.querySelector(".csg-group-count")?.textContent === "2");
+  assert.equal(clicks, 1);
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("project reveal pagination stops at the total click cap", async () => {
+  const members = Array.from({ length: 10 }, (_, index) => descriptor(`local:page-${index}`));
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    onShowAll: ({ stack }) => {
+      clicks += 1;
+      stack.appendChild(makeThreadWrapper(started.window, members[clicks]));
+    },
+  });
+
+  await waitFor(() => clicks === 8);
+  await delay(400);
+  assert.equal(clicks, 8);
+  assert.equal(started.stack.querySelector(".csg-group-count")?.textContent, "9/10");
+  assert.equal(started.stack.querySelector(".csg-group-row")?.getAttribute("data-csg-incomplete"), "true");
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("a no-progress list remount cannot reset the reveal latch", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:missing")];
+  let clicks = 0;
+  let started;
+  let currentList;
+  const onShowAll = () => {
+    clicks += 1;
+    const next = makeProjectList(started.window, [members[0]], {
+      showAll: "true",
+      showAllControl: true,
+      onShowAll,
+    });
+    currentList.remove();
+    started.window.document.body.appendChild(next.list);
+    currentList = next.list;
+  };
+  started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    onShowAll,
+  });
+  currentList = started.list;
+
+  await waitFor(() => clicks === 1);
+  await delay(1_200);
+  assert.equal(clicks, 1);
+  assert.equal(started.window.document.querySelector(".csg-group-count")?.textContent, "1/2");
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("project reveal click budget survives progress remounts", async () => {
+  const members = Array.from({ length: 10 }, (_, index) => descriptor(`local:remount-page-${index}`));
+  let clicks = 0;
+  let started;
+  let currentList;
+  const onShowAll = () => {
+    clicks += 1;
+    const next = makeProjectList(started.window, members.slice(0, clicks + 1), {
+      showAll: "true",
+      showAllControl: true,
+      onShowAll,
+    });
+    currentList.remove();
+    started.window.document.body.appendChild(next.list);
+    currentList = next.list;
+  };
+  started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: true,
+    onShowAll,
+  });
+  currentList = started.list;
+
+  await waitFor(() => clicks === 8);
+  await delay(500);
+  assert.equal(clicks, 8);
+  assert.equal(started.window.document.querySelector(".csg-group-count")?.textContent, "9/10");
+  api(started.window).destroy();
+  started.window.close();
+});
+
+test("a stale true attribute without a show-all control does not click and stays fail-open", async () => {
+  const members = [descriptor("local:visible"), descriptor("local:missing")];
+  let clicks = 0;
+  const started = boot(members, [members[0]], {
+    collapsed: true,
+    showAll: "true",
+    showAllControl: false,
+    onShowAll: () => { clicks += 1; },
+  });
+
+  await delay(200);
+  const visibleRow = started.stack.querySelector('[data-app-action-sidebar-thread-id="local:visible"]');
+  assert.equal(clicks, 0);
+  assert.equal(started.stack.querySelector(".csg-group-count")?.textContent, "1/2");
+  assert.equal(started.stack.querySelector(".csg-group-row")?.getAttribute("data-csg-incomplete"), "true");
+  assert.equal(visibleRow.closest('[role="listitem"]').hasAttribute("data-csg-hidden"), false);
+  assert.equal(visibleRow.classList.contains("csg-grouped-thread"), false);
+  assert.equal(Object.keys(api(started.window).getState().projects[projectId].membership).length, 2);
+  api(started.window).destroy();
+  started.window.close();
 });
 
 test("a managed hidden row fails open after losing its native thread id", async () => {
@@ -193,7 +615,7 @@ test("destroy cleans a managed hidden row after its native thread id disappears"
   window.close();
 });
 
-test("a remounted or reset native list can reveal members again", async () => {
+test("a remounted or newly incomplete native list can reveal members again", async () => {
   const members = [descriptor("local:t1"), descriptor("local:t2"), descriptor("local:t3")];
   let firstClicks = 0;
   const first = boot(members, [members[0]], {
