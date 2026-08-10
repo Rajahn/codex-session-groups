@@ -1,0 +1,16 @@
+{
+  "name": "codex-session-groups",
+  "version": "0.1.2",
+  "private": true,
+  "type": "module",
+  "description": "Local-only visual session groups for the Codex desktop sidebar.",
+  "scripts": {
+    "start": "node scripts/codex-injector.mjs --launch --watch",
+    "attach": "node scripts/codex-injector.mjs --attach --watch",
+    "check": "node --check inject/model.js && node --check inject/session-groups.user.js && node --check scripts/codex-injector.mjs && node --test",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
