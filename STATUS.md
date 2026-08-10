@@ -4,7 +4,7 @@ Updated: 2026-08-10
 
 ## Current
 
-- v0.1.6 is attached to the primary renderer: the verified API version changed from v0.1.5 before injection to v0.1.6 after injection. The release changes are not yet committed or pushed.
+- v0.1.6 is attached to the primary renderer: the verified API version changed from v0.1.5 before injection to v0.1.6 after injection. Implementation commit `08929c5` is pushed to the private personal `origin/main`.
 - Scope remains local-only visual groups: create, rename, delete, expand/collapse, and drag tasks into or out of a group. No task content, context, branch, Goal, archive state, or worktree is changed.
 - Persistence remains renderer `localStorage` under `codex-session-groups:v1`; runtime dependencies remain zero. `happy-dom` is dev-only for executable DOM lifecycle tests.
 - Earlier incident evidence: after the user removed the two temporary recovery pins, `质检分支实现` stalled at `1/3`. Codex's native task index still contained all three tasks under the same project and showed both recovered tasks as unpinned; the grouping `storageRaw` remained byte-identical at 3 groups, 5 memberships, and 5 thread hints.
@@ -33,5 +33,4 @@ Updated: 2026-08-10
 ## Next
 
 - Deployment and storage-preservation verification are complete; no further renderer injection or state migration is pending.
-- Commit and push the verified v0.1.6 release changes.
 - If a future Codex release changes semantic sidebar hooks, update selectors and rerun the isolated smoke test before attaching to the primary profile.
