@@ -27,8 +27,10 @@ test("contains the agreed native-like interactions", () => {
 test("only removes visual membership after an explicit native archive disappears", () => {
   assert.match(source, /归档聊天\|archive chat/);
   assert.match(source, /scheduleArchiveReconciliation/);
-  assert.match(source, /if \(!threadExistsAnywhere\(threadId\)\)/);
+  assert.match(source, /if \(!threadExistsAnywhere\(pending\.observedThreadId\)\)/);
   assert.match(source, /model\.unassignThreads/);
+  assert.match(source, /rekeyPendingMembershipChecks/);
+  assert.match(source, /transientMembershipContextForRow/);
   assert.doesNotMatch(source, /scheduleMissingMembershipReconciliation/);
   assert.doesNotMatch(source, /set_thread_archived|setThreadArchived/);
 });
@@ -44,5 +46,33 @@ test("upgrades temporary thread ids only through the model's guarded identity sy
   assert.match(source, /model\.syncThreadIdentities/);
   assert.match(source, /project-show-all["']\) === ["']true/);
   assert.match(source, /data-app-action-sidebar-thread-title/);
+  assert.match(source, /migrationTarget: false/);
   assert.doesNotMatch(source, /querySelector.*client-new-thread/);
+});
+
+test("fails open when Codex has not loaded saved group members", () => {
+  assert.match(source, /analyzeProjectAvailability/);
+  assert.match(source, /availability\.incomplete/);
+  assert.match(source, /nativeRows\.forEach\(\(\{ row, wrapper \}\) => restoreThreadRow/);
+  assert.match(source, /项目列表可见/);
+  assert.match(source, /当前暂不折叠项目列表/);
+});
+
+test("reveal retries are scoped to the current list signature", () => {
+  assert.match(source, /groupRevealSignature/);
+  assert.match(source, /currentList !== run\.list/);
+  assert.match(source, /groupRevealRuns/);
+  assert.doesNotMatch(source, /attemptedGroupReveals/);
+  assert.match(source, /scheduleProjectMembersReveal/);
+});
+
+test("prunes disconnected wrappers retained by previous list mounts", () => {
+  assert.match(source, /pruneRuntimeTrackers/);
+  assert.match(source, /if \(!element\?\.isConnected\) touchedOrderElements\.delete\(element\)/);
+});
+
+test("destroyed renderers cannot be revived by delayed callbacks", () => {
+  assert.match(source, /if \(destroyed \|\| renderFrame\) return/);
+  assert.match(source, /if \(destroyed \|\| rendering\) return/);
+  assert.match(source, /destroyed = true/);
 });

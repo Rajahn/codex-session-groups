@@ -9,4 +9,5 @@ This is a small personal side project. Keep it independent from company reposito
 - A temporary `client-new-thread` ID may be migrated only from saved visual metadata when the project list is fully rendered and the title/host/kind fingerprint has exactly one unassigned stable-ID match. Ambiguity must fail closed.
 - Keep runtime dependencies at zero unless a concrete need is proven.
 - Injection must fail closed when expected semantic DOM markers are absent.
+- If saved members are missing from the native DOM, preserve all metadata and fail open visually: do not hide or reorder any native task until Codex renders the saved members again.
 - Test against an isolated Codex profile before attaching to the user's primary window.

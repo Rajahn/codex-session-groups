@@ -5,7 +5,7 @@
   const MODEL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
   const STORAGE_KEY = "codex-session-groups:v1";
   const STYLE_ID = "codex-session-groups-style-v1";
-  const VERSION = "0.1.2";
+  const VERSION = "0.1.3";
   const PROJECT_ROW_SELECTOR = "[data-app-action-sidebar-project-row]";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_ROW_SELECTOR = "[data-app-action-sidebar-thread-id]";
@@ -23,6 +23,7 @@
   let observer = null;
   let renderFrame = 0;
   let rendering = false;
+  let destroyed = false;
   let activeProjectMenuId = "";
   let editingGroup = null;
   let dragSession = null;
@@ -32,8 +33,8 @@
   const originalOrders = new WeakMap();
   const touchedOrderElements = new Set();
   const membershipChecks = new Map();
-  const groupRevealTimers = new Map();
-  const attemptedGroupReveals = new Set();
+  const groupRevealRuns = new Map();
+  const blockedTransientMigrations = new Set();
 
   const folderIcon = `
     <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -133,10 +134,6 @@
     return `${projectId}\u0000${threadId}`;
   }
 
-  function groupKey(projectId, groupId) {
-    return `${projectId}\u0000${groupId}`;
-  }
-
   function membershipContext(threadId, preferredProjectId = "") {
     if (!threadId) return null;
     const candidateIds = preferredProjectId
@@ -149,10 +146,49 @@
     return null;
   }
 
+  function transientMembershipContextForRow(row, preferredProjectId) {
+    const descriptor = threadDescriptorForRow(row);
+    if (!preferredProjectId || !descriptor || model.isTransientThreadId(descriptor.id)) return null;
+    const config = projectConfig(preferredProjectId);
+    const candidates = Object.entries(config.membership).filter(([threadId]) => {
+      if (!model.isTransientThreadId(threadId)) return false;
+      const hint = config.threadHints[threadId];
+      return Boolean(hint
+        && hint.title === descriptor.title
+        && hint.hostId === descriptor.hostId
+        && hint.kind === descriptor.kind);
+    });
+    if (candidates.length === 0) return null;
+
+    const list = projectList(preferredProjectId);
+    const matchingRows = threadRowsAnywhere().filter((candidateRow) => {
+      const candidate = threadDescriptorForRow(candidateRow);
+      return Boolean(candidate
+        && candidate.title === descriptor.title
+        && candidate.hostId === descriptor.hostId
+        && candidate.kind === descriptor.kind);
+    });
+    const uniqueTarget = list?.getAttribute("data-app-action-sidebar-project-show-all") === "true"
+      && matchingRows.length === 1
+      && matchingRows[0] === row;
+    if (candidates.length !== 1 || !uniqueTarget) {
+      candidates.forEach(([threadId]) => {
+        blockedTransientMigrations.add(membershipKey(preferredProjectId, threadId));
+      });
+      return null;
+    }
+    const [threadId, groupId] = candidates[0];
+    return { projectId: preferredProjectId, threadId, groupId };
+  }
+
   function threadExistsAnywhere(threadId) {
     return Array.from(document.querySelectorAll(THREAD_ROW_SELECTOR)).some(
       (row) => threadIdForRow(row) === threadId,
     );
+  }
+
+  function threadRowsAnywhere() {
+    return Array.from(document.querySelectorAll(THREAD_ROW_SELECTOR));
   }
 
   function listStack(list) {
@@ -169,10 +205,32 @@
   }
 
   function syncProjectThreadIdentities(projectId, list, nativeRows) {
-    const descriptors = nativeRows.map(({ row }) => threadDescriptorForRow(row)).filter(Boolean);
-    const allowMigration = list?.getAttribute("data-app-action-sidebar-project-show-all") === "true";
+    blockedTransientMigrations.forEach((key) => {
+      const prefix = `${projectId}\u0000`;
+      if (!key.startsWith(prefix)) return;
+      const threadId = key.slice(prefix.length);
+      if (!projectConfig(projectId).membership[threadId]) blockedTransientMigrations.delete(key);
+    });
+    const ownRows = new Set(nativeRows.map(({ row }) => row));
+    const descriptors = [
+      ...nativeRows.map(({ row }) => ({ ...threadDescriptorForRow(row), migrationTarget: true })),
+      ...threadRowsAnywhere()
+        .filter((row) => !ownRows.has(row))
+        .map((row) => ({ ...threadDescriptorForRow(row), migrationTarget: false })),
+    ].filter((descriptor) => descriptor.id && descriptor.title);
+    const renderedIds = new Set(descriptors.map(({ id }) => id));
+    const hasMissingStableMembership = Object.keys(projectConfig(projectId).membership).some(
+      (threadId) => !model.isTransientThreadId(threadId) && !renderedIds.has(threadId),
+    );
+    const hasBlockedTransientMigration = Object.keys(projectConfig(projectId).membership).some(
+      (threadId) => blockedTransientMigrations.has(membershipKey(projectId, threadId)),
+    );
+    const allowMigration = !hasMissingStableMembership
+      && !hasBlockedTransientMigration
+      && list?.getAttribute("data-app-action-sidebar-project-show-all") === "true";
     const result = model.syncThreadIdentities(state, projectId, descriptors, allowMigration);
     if (!result.changed) return result;
+    rekeyPendingMembershipChecks(projectId, result.migrations);
     saveState(result.state);
     return result;
   }
@@ -202,6 +260,7 @@
       .csg-group-name-wrap { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; margin-inline-start: 3px; }
       .csg-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
       .csg-group-count { flex: 0 0 auto; color: var(--token-description-foreground, currentColor); font-size: 11px; opacity: .68; }
+      .csg-group-row[data-csg-incomplete="true"] .csg-group-count { color: var(--token-warning-foreground, #9a6700); opacity: 1; }
       .csg-group-menu-button { display: flex; width: 24px; height: 24px; flex: 0 0 24px; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--token-description-foreground, currentColor); opacity: 0; cursor: pointer; }
       .csg-group-menu-button svg { width: 18px; height: 18px; }
       .csg-group-row:hover .csg-group-menu-button, .csg-group-row:focus-within .csg-group-menu-button { opacity: 1; }
@@ -253,7 +312,26 @@
     return wrapper;
   }
 
-  function renderGroup(nativeProjectRow, stack, projectId, group, groupIndex, membership) {
+  function analyzeProjectAvailability(config, nativeRows) {
+    const ownIds = new Set(nativeRows.map(({ row }) => threadIdForRow(row)).filter(Boolean));
+    const globalIds = new Set(threadRowsAnywhere().map(threadIdForRow).filter(Boolean));
+    const groups = new Map();
+    let unresolvedCount = 0;
+
+    for (const group of config.groups) {
+      const memberIds = Object.entries(config.membership)
+        .filter(([, assignedGroupId]) => assignedGroupId === group.id)
+        .map(([threadId]) => threadId);
+      const visible = memberIds.filter((threadId) => ownIds.has(threadId)).length;
+      const external = memberIds.filter((threadId) => !ownIds.has(threadId) && globalIds.has(threadId)).length;
+      const unresolved = memberIds.length - visible - external;
+      unresolvedCount += unresolved;
+      groups.set(group.id, { total: memberIds.length, visible, external, unresolved });
+    }
+    return { incomplete: unresolvedCount > 0, unresolvedCount, groups };
+  }
+
+  function renderGroup(nativeProjectRow, stack, projectId, group, groupIndex, availability, forceOpen) {
     let wrapper = Array.from(stack.children).find(
       (child) => child.dataset?.csgProjectId === projectId && child.dataset?.csgGroupId === group.id,
     );
@@ -266,10 +344,23 @@
     const desiredClasses = `${nativeProjectRow.className} csg-group-row`;
     if (row.className !== desiredClasses) row.className = desiredClasses;
     wrapper.style.order = String(groupIndex * 10_000);
-    setAttribute(row, "aria-expanded", String(!group.collapsed));
-    const memberCount = Object.values(membership).filter((id) => id === group.id).length;
-    setAttribute(row, "aria-label", `${group.name}，${memberCount} 个会话`);
-    row.title = group.collapsed ? "点击展开分组" : "点击收起分组";
+    setAttribute(row, "aria-expanded", String(forceOpen || !group.collapsed));
+    const summary = availability || { total: 0, visible: 0, external: 0, unresolved: 0 };
+    const countText = summary.total === 0
+      ? ""
+      : summary.visible === summary.total ? String(summary.total) : `${summary.visible}/${summary.total}`;
+    const unavailable = summary.external + summary.unresolved;
+    setAttribute(row, "aria-label", unavailable > 0
+      ? `${group.name}，项目列表可见 ${summary.visible} 个，共 ${summary.total} 个会话`
+      : `${group.name}，${summary.total} 个会话`);
+    setAttribute(row, "data-csg-incomplete", String(summary.unresolved > 0));
+    if (summary.unresolved > 0) {
+      row.title = `Codex 尚未加载 ${summary.unresolved} 个分组会话；当前暂不折叠项目列表`;
+    } else if (summary.external > 0) {
+      row.title = `${summary.external} 个分组会话位于项目列表外（可能已置顶）`;
+    } else {
+      row.title = group.collapsed ? "点击展开分组" : "点击收起分组";
+    }
     const name = row.querySelector(".csg-group-name");
     const count = row.querySelector(".csg-group-count");
     const isEditing = editingGroup?.projectId === projectId && editingGroup?.groupId === group.id;
@@ -279,7 +370,7 @@
       name.hidden = false;
       setText(name, group.name);
     }
-    setText(count, memberCount > 0 ? String(memberCount) : "");
+    setText(count, countText);
     const menuButton = row.querySelector(".csg-group-menu-button");
     setAttribute(menuButton, "aria-label", `${group.name} 的分组操作`);
     menuButton.title = "分组操作";
@@ -337,7 +428,9 @@
     );
     const validGroupIds = new Set(config.groups.map((group) => group.id));
     existingGroupItems.forEach((item) => {
-      if (!validGroupIds.has(item.dataset.csgGroupId)) item.remove();
+      if (!validGroupIds.has(item.dataset.csgGroupId)) {
+        item.remove();
+      }
     });
 
     const nativeRows = Array.from(stack.querySelectorAll(THREAD_ROW_SELECTOR))
@@ -346,8 +439,10 @@
 
     const identitySync = syncProjectThreadIdentities(projectId, list, nativeRows);
     if (identitySync.changed) config = projectConfig(projectId);
+    const availability = analyzeProjectAvailability(config, nativeRows);
 
     if (config.groups.length === 0) {
+      resetProjectMembersReveal(projectId);
       Array.from(stack.querySelectorAll(":scope > .csg-group-item")).forEach((item) => item.remove());
       nativeRows.forEach(({ row, wrapper }) => restoreThreadRow(row, wrapper));
       Array.from(stack.children).forEach((child) => {
@@ -357,10 +452,30 @@
     }
 
     config.groups.forEach((group, index) => {
-      renderGroup(nativeProjectRow, stack, projectId, group, index, config.membership);
-      if (group.collapsed) resetGroupMembersReveal(projectId, group.id);
-      else scheduleGroupMembersReveal(projectId, group.id);
+      renderGroup(
+        nativeProjectRow,
+        stack,
+        projectId,
+        group,
+        index,
+        availability.groups.get(group.id),
+        availability.incomplete,
+      );
     });
+    if (availability.incomplete || config.groups.some((group) => !group.collapsed)) {
+      scheduleProjectMembersReveal(projectId);
+    } else {
+      resetProjectMembersReveal(projectId);
+    }
+
+    if (availability.incomplete) {
+      nativeRows.forEach(({ row, wrapper }) => restoreThreadRow(row, wrapper));
+      Array.from(stack.children).forEach((child) => {
+        if (child.matches?.(".csg-group-item")) return;
+        if (originalOrders.has(child)) child.style.order = originalOrders.get(child);
+      });
+      return;
+    }
 
     nativeRows.forEach(({ row, wrapper }, nativeIndex) => {
       if (!originalOrders.has(wrapper)) originalOrders.set(wrapper, wrapper.style.order || "");
@@ -463,6 +578,25 @@
     return result.group;
   }
 
+  function projectHasUnresolvedMembers(projectId) {
+    const list = projectList(projectId);
+    const stack = listStack(list);
+    if (!stack) return false;
+    const nativeRows = Array.from(stack.querySelectorAll(THREAD_ROW_SELECTOR))
+      .map((row) => ({ row, wrapper: directThreadWrapper(row, stack) }))
+      .filter((entry) => entry.wrapper);
+    return analyzeProjectAvailability(projectConfig(projectId), nativeRows).incomplete;
+  }
+
+  function toggleGroupFromInteraction(projectId, groupId, forcedCollapsed) {
+    if (projectHasUnresolvedMembers(projectId)) {
+      scheduleProjectMembersReveal(projectId, true);
+      showToast("Codex 尚未加载全部分组会话；当前保持展开且不修改折叠状态");
+      return null;
+    }
+    return toggleGroup(projectId, groupId, forcedCollapsed);
+  }
+
   function assignThread(projectId, threadId, groupId) {
     const previous = projectConfig(projectId).membership[threadId] || null;
     if ((groupId || null) === previous) return;
@@ -483,37 +617,67 @@
     membershipChecks.delete(key);
   }
 
+  function rekeyPendingMembershipChecks(projectId, migrations) {
+    for (const migration of migrations || []) {
+      if (!migration?.fromThreadId || !migration?.toThreadId) continue;
+      const oldKey = membershipKey(projectId, migration.fromThreadId);
+      const pending = membershipChecks.get(oldKey);
+      if (!pending || pending.projectId !== projectId) continue;
+      const newKey = membershipKey(projectId, migration.toThreadId);
+      const conflicting = membershipChecks.get(newKey);
+      if (conflicting && conflicting !== pending) {
+        window.clearTimeout(conflicting.timer);
+        membershipChecks.delete(newKey);
+      }
+      membershipChecks.delete(oldKey);
+      pending.threadId = migration.toThreadId;
+      if (pending.observedThreadId === migration.fromThreadId) {
+        pending.observedThreadId = migration.toThreadId;
+      }
+      pending.key = newKey;
+      membershipChecks.set(newKey, pending);
+    }
+  }
+
   function removeVisualMembership(projectId, threadId, expectedGroupId) {
     if (projectConfig(projectId).membership[threadId] !== expectedGroupId) return false;
     const result = model.unassignThreads(state, projectId, [threadId]);
     if (result.threadIds.length === 0) return false;
     saveState(result.state);
-    scheduleGroupMembersReveal(projectId, expectedGroupId, true);
+    scheduleProjectMembersReveal(projectId, true);
     return true;
   }
 
-  function scheduleArchiveReconciliation(projectId, threadId, groupId) {
+  function scheduleArchiveReconciliation(projectId, threadId, groupId, observedThreadId = threadId) {
     clearMembershipCheck(projectId, threadId);
     const key = membershipKey(projectId, threadId);
-    let attempts = 0;
-
-    const verify = () => {
-      const pending = membershipChecks.get(key);
-      if (!pending || pending.reason !== "archive") return;
-      membershipChecks.delete(key);
-      if (projectConfig(projectId).membership[threadId] !== groupId) return;
-      if (!threadExistsAnywhere(threadId)) {
-        removeVisualMembership(projectId, threadId, groupId);
-        return;
-      }
-      attempts += 1;
-      if (attempts >= 5) return;
-      const timer = window.setTimeout(verify, 300 + attempts * 250);
-      membershipChecks.set(key, { reason: "archive", timer });
+    const pending = {
+      reason: "archive",
+      projectId,
+      threadId,
+      observedThreadId,
+      groupId,
+      attempts: 0,
+      key,
+      timer: 0,
     };
 
-    const timer = window.setTimeout(verify, 350);
-    membershipChecks.set(key, { reason: "archive", timer });
+    const verify = () => {
+      if (membershipChecks.get(pending.key) !== pending || pending.reason !== "archive") return;
+      membershipChecks.delete(pending.key);
+      if (projectConfig(projectId).membership[pending.threadId] !== pending.groupId) return;
+      if (!threadExistsAnywhere(pending.observedThreadId)) {
+        removeVisualMembership(projectId, pending.threadId, pending.groupId);
+        return;
+      }
+      pending.attempts += 1;
+      if (pending.attempts >= 5) return;
+      pending.timer = window.setTimeout(verify, 300 + pending.attempts * 250);
+      membershipChecks.set(pending.key, pending);
+    };
+
+    pending.timer = window.setTimeout(verify, 350);
+    membershipChecks.set(key, pending);
   }
 
   function showAllControl(list) {
@@ -523,61 +687,97 @@
     }) || null;
   }
 
-  function ensureGroupMembersRendered(projectId, groupId) {
-    const group = groupConfig(projectId, groupId);
-    const list = projectList(projectId);
-    if (!group || group.collapsed || !list) return false;
+  function groupRevealSignature(list) {
+    const ids = Array.from(list?.querySelectorAll?.(THREAD_ROW_SELECTOR) || [])
+      .map(threadIdForRow)
+      .filter(Boolean)
+      .sort();
+    return `${list?.getAttribute("data-app-action-sidebar-project-show-all") || ""}\u0000${ids.join("\u0000")}`;
+  }
 
-    const memberIds = Object.entries(projectConfig(projectId).membership)
-      .filter(([, assignedGroupId]) => assignedGroupId === groupId)
-      .map(([threadId]) => threadId);
+  function ensureProjectMembersRendered(projectId, allowClick) {
+    const config = projectConfig(projectId);
+    const list = projectList(projectId);
+    if (!list || config.groups.length === 0) return { status: "complete", unresolvedIds: [] };
+
+    const memberIds = Object.keys(config.membership);
     const missingIds = memberIds.filter((threadId) => !threadExistsAnywhere(threadId));
-    if (missingIds.length === 0 || list.getAttribute("data-app-action-sidebar-project-show-all") !== "false") {
-      return false;
+    if (missingIds.length === 0) return { status: "complete", unresolvedIds: [] };
+    if (list.getAttribute("data-app-action-sidebar-project-show-all") !== "false") {
+      return { status: "incomplete", unresolvedIds: missingIds };
     }
 
     const control = showAllControl(list);
-    if (!control) return true;
+    if (!control || !allowClick) return { status: "wait", unresolvedIds: missingIds };
     control.click();
     window.setTimeout(scheduleRender, 0);
-    return false;
+    return { status: "clicked", unresolvedIds: missingIds };
   }
 
-  function scheduleGroupMembersReveal(projectId, groupId, force = false) {
-    const key = groupKey(projectId, groupId);
-    if (!force && attemptedGroupReveals.has(key)) return;
-    attemptedGroupReveals.add(key);
-    window.clearTimeout(groupRevealTimers.get(key));
-    let attempts = 0;
+  function scheduleProjectMembersReveal(projectId, force = false) {
+    const key = projectId;
+    const list = projectList(projectId);
+    if (!list) {
+      resetProjectMembersReveal(projectId);
+      return;
+    }
+    const signature = groupRevealSignature(list);
+    const existing = groupRevealRuns.get(key);
+    if (!force && existing?.list === list && existing.signature === signature) return;
+    if (existing) window.clearTimeout(existing.timer);
+    const run = { list, signature, attempts: 0, clicked: false, timer: 0 };
     const reveal = () => {
-      groupRevealTimers.delete(key);
-      const shouldRetry = ensureGroupMembersRendered(projectId, groupId);
-      attempts += 1;
-      if (!shouldRetry || attempts >= 4) return;
-      groupRevealTimers.set(key, window.setTimeout(reveal, attempts * 200));
+      if (groupRevealRuns.get(key) !== run) return;
+      const currentList = projectList(projectId);
+      if (currentList !== run.list || groupRevealSignature(currentList) !== run.signature) {
+        groupRevealRuns.delete(key);
+        scheduleRender();
+        return;
+      }
+      const result = ensureProjectMembersRendered(projectId, !run.clicked);
+      run.attempts += 1;
+      if (result.status === "clicked") run.clicked = true;
+      if (["complete", "incomplete"].includes(result.status) || run.attempts >= 5) {
+        groupRevealRuns.delete(key);
+        return;
+      }
+      run.timer = window.setTimeout(reveal, run.attempts * 200);
     };
-    groupRevealTimers.set(key, window.setTimeout(reveal, 0));
+    run.timer = window.setTimeout(reveal, 0);
+    groupRevealRuns.set(key, run);
   }
 
-  function resetGroupMembersReveal(projectId, groupId) {
-    const key = groupKey(projectId, groupId);
-    attemptedGroupReveals.delete(key);
-    window.clearTimeout(groupRevealTimers.get(key));
-    groupRevealTimers.delete(key);
+  function resetProjectMembersReveal(projectId) {
+    const key = projectId;
+    const run = groupRevealRuns.get(key);
+    if (run) window.clearTimeout(run.timer);
+    groupRevealRuns.delete(key);
   }
 
   function scheduleRender() {
-    if (renderFrame) return;
+    if (destroyed || renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
       renderFrame = 0;
       render();
     });
   }
 
+  function pruneRuntimeTrackers() {
+    touchedOrderElements.forEach((element) => {
+      if (!element?.isConnected) touchedOrderElements.delete(element);
+    });
+    groupRevealRuns.forEach((run, key) => {
+      if (run.list?.isConnected) return;
+      window.clearTimeout(run.timer);
+      groupRevealRuns.delete(key);
+    });
+  }
+
   function render() {
-    if (rendering) return;
+    if (destroyed || rendering) return;
     rendering = true;
     try {
+      pruneRuntimeTrackers();
       injectStyles();
       projectRows().forEach(renderProject);
       injectProjectMenuItems();
@@ -768,8 +968,11 @@
       const threadId = threadIdForRow(threadRow);
       const preferredProjectId = threadRow?.closest(PROJECT_LIST_SELECTOR)
         ?.getAttribute("data-app-action-sidebar-project-list-id") || threadRow?.dataset.csgProjectId || "";
-      const context = membershipContext(threadId, preferredProjectId);
-      if (context) scheduleArchiveReconciliation(context.projectId, context.threadId, context.groupId);
+      const context = membershipContext(threadId, preferredProjectId)
+        || transientMembershipContextForRow(threadRow, preferredProjectId);
+      if (context) {
+        scheduleArchiveReconciliation(context.projectId, context.threadId, context.groupId, threadId);
+      }
     }
 
     const createItem = event.target.closest?.('[data-csg-create-group="true"]');
@@ -806,7 +1009,7 @@
     if (groupRow && !event.target.closest("input")) {
       event.preventDefault();
       event.stopPropagation();
-      toggleGroup(groupRow.dataset.csgProjectId, groupRow.dataset.csgGroupId);
+      toggleGroupFromInteraction(groupRow.dataset.csgProjectId, groupRow.dataset.csgGroupId);
     }
   }
 
@@ -841,13 +1044,13 @@
     if (!row || event.target.closest("input,button")) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      toggleGroup(row.dataset.csgProjectId, row.dataset.csgGroupId);
+      toggleGroupFromInteraction(row.dataset.csgProjectId, row.dataset.csgGroupId);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      toggleGroup(row.dataset.csgProjectId, row.dataset.csgGroupId, false);
+      toggleGroupFromInteraction(row.dataset.csgProjectId, row.dataset.csgGroupId, false);
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
-      toggleGroup(row.dataset.csgProjectId, row.dataset.csgGroupId, true);
+      toggleGroupFromInteraction(row.dataset.csgProjectId, row.dataset.csgGroupId, true);
     } else if (event.key === "F2") {
       event.preventDefault();
       beginRename(row.dataset.csgProjectId, row.dataset.csgGroupId);
@@ -898,6 +1101,8 @@
   }
 
   function destroy() {
+    if (destroyed) return;
+    destroyed = true;
     observer?.disconnect();
     observer = null;
     if (renderFrame) cancelAnimationFrame(renderFrame);
@@ -907,9 +1112,9 @@
     window.clearTimeout(toastTimer);
     membershipChecks.forEach(({ timer }) => window.clearTimeout(timer));
     membershipChecks.clear();
-    groupRevealTimers.forEach((timer) => window.clearTimeout(timer));
-    groupRevealTimers.clear();
-    attemptedGroupReveals.clear();
+    groupRevealRuns.forEach((run) => window.clearTimeout(run.timer));
+    groupRevealRuns.clear();
+    blockedTransientMigrations.clear();
     document.querySelector(".csg-toast")?.remove();
     document.getElementById(STYLE_ID)?.remove();
     document.querySelectorAll(".csg-group-item").forEach((item) => item.remove());
@@ -982,6 +1187,11 @@
     deleteGroup,
     assignThread,
     toggleGroup,
+    getDiagnostics: () => ({
+      membershipChecks: membershipChecks.size,
+      groupRevealRuns: groupRevealRuns.size,
+      touchedOrderElements: touchedOrderElements.size,
+    }),
     refresh: render,
     destroy,
   });

@@ -2,15 +2,19 @@
   "use strict";
 
   const GLOBAL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
-  const IMPLEMENTATION_VERSION = "0.1.2";
+  const IMPLEMENTATION_VERSION = "0.1.3";
   const VERSION = 1;
   const MAX_NAME_LENGTH = 60;
   const MAX_THREAD_TITLE_LENGTH = 500;
 
   if (globalThis[GLOBAL_KEY]?.IMPLEMENTATION_VERSION === IMPLEMENTATION_VERSION) return;
 
+  function dictionary() {
+    return Object.create(null);
+  }
+
   function emptyState() {
-    return { version: VERSION, projects: {} };
+    return { version: VERSION, projects: dictionary() };
   }
 
   function text(value) {
@@ -79,7 +83,7 @@
         });
       }
 
-      const membership = {};
+      const membership = dictionary();
       if (rawProject.membership && typeof rawProject.membership === "object") {
         for (const [rawThreadId, rawGroupId] of Object.entries(rawProject.membership)) {
           const threadId = text(rawThreadId);
@@ -88,7 +92,7 @@
         }
       }
 
-      const threadHints = {};
+      const threadHints = dictionary();
       if (rawProject.threadHints && typeof rawProject.threadHints === "object") {
         for (const [rawThreadId, rawHint] of Object.entries(rawProject.threadHints)) {
           const threadId = text(rawThreadId);
@@ -108,7 +112,9 @@
     const normalized = normalizeState(state);
     const id = text(projectId);
     if (!id) throw new Error("projectId is required");
-    normalized.projects[id] ||= { groups: [], membership: {}, threadHints: {} };
+    if (!Object.hasOwn(normalized.projects, id)) {
+      normalized.projects[id] = { groups: [], membership: dictionary(), threadHints: dictionary() };
+    }
     return { state: normalized, project: normalized.projects[id], projectId: id };
   }
 
@@ -215,51 +221,85 @@
   function syncThreadIdentities(state, projectId, renderedThreads, allowMigration = false) {
     const copy = projectCopy(state, projectId);
     const descriptors = [];
-    const seenIds = new Set();
     for (const rawDescriptor of Array.isArray(renderedThreads) ? renderedThreads : []) {
       const id = text(rawDescriptor?.id);
       const hint = threadHint(rawDescriptor);
-      if (!id || !hint || seenIds.has(id)) continue;
-      seenIds.add(id);
-      descriptors.push({ id, hint });
+      if (!id || !hint) continue;
+      descriptors.push({
+        id,
+        hint,
+        migrationTarget: rawDescriptor?.migrationTarget !== false,
+      });
     }
+    const descriptorCounts = new Map();
+    for (const descriptor of descriptors) {
+      descriptorCounts.set(descriptor.id, (descriptorCounts.get(descriptor.id) || 0) + 1);
+    }
+    descriptors.forEach((descriptor) => {
+      descriptor.duplicateId = descriptorCounts.get(descriptor.id) > 1;
+    });
 
     let changed = false;
     const migrations = [];
     const renderedIds = new Set(descriptors.map((descriptor) => descriptor.id));
     if (allowMigration) {
-      const staleEntries = Object.entries(copy.project.membership).filter(([threadId]) => (
+      const staleSources = Object.entries(copy.project.membership).filter(([threadId]) => (
         isTransientThreadId(threadId)
         && !renderedIds.has(threadId)
         && copy.project.threadHints[threadId]
-      ));
-      for (const [oldThreadId, groupId] of staleEntries) {
-        const savedHint = copy.project.threadHints[oldThreadId];
-        const sameSourceHints = staleEntries.filter(([candidateId]) => (
-          sameThreadHint(copy.project.threadHints[candidateId], savedHint)
-        ));
-        if (sameSourceHints.length !== 1) continue;
+      )).map(([id, groupId]) => ({
+        id,
+        groupId,
+        hint: copy.project.threadHints[id],
+      }));
+      const stableTargets = descriptors.filter(({ id }) => !isTransientThreadId(id));
+      const targetsBySource = new Map();
+      const sourcesByTarget = new Map();
 
-        const candidates = descriptors.filter(({ id, hint }) => (
-          id !== oldThreadId
-          && !isTransientThreadId(id)
-          && !copy.project.membership[id]
-          && matchingThreadHint(savedHint, hint)
-        ));
-        if (candidates.length !== 1) continue;
+      for (const source of staleSources) {
+        const targets = stableTargets.filter(({ hint }) => matchingThreadHint(source.hint, hint));
+        targetsBySource.set(source.id, targets);
+        for (const target of targets) {
+          const sources = sourcesByTarget.get(target.id) || [];
+          sources.push(source);
+          sourcesByTarget.set(target.id, sources);
+        }
+      }
 
-        const target = candidates[0];
-        delete copy.project.membership[oldThreadId];
-        delete copy.project.threadHints[oldThreadId];
-        copy.project.membership[target.id] = groupId;
+      const plannedMigrations = [];
+      for (const source of staleSources) {
+        const targets = targetsBySource.get(source.id) || [];
+        if (targets.length !== 1) continue;
+        const target = targets[0];
+        if ((sourcesByTarget.get(target.id) || []).length !== 1) continue;
+        if (target.duplicateId || !target.migrationTarget || Object.hasOwn(copy.project.membership, target.id)) continue;
+        plannedMigrations.push({ source, target });
+      }
+
+      for (const { source, target } of plannedMigrations) {
+        delete copy.project.membership[source.id];
+        delete copy.project.threadHints[source.id];
+        copy.project.membership[target.id] = source.groupId;
         copy.project.threadHints[target.id] = target.hint;
-        migrations.push({ fromThreadId: oldThreadId, toThreadId: target.id, groupId });
+        migrations.push({
+          fromThreadId: source.id,
+          toThreadId: target.id,
+          groupId: source.groupId,
+        });
         changed = true;
       }
     }
 
-    for (const { id, hint } of descriptors) {
-      if (!copy.project.membership[id]) continue;
+    const descriptorsById = new Map();
+    for (const descriptor of descriptors) {
+      const matches = descriptorsById.get(descriptor.id) || [];
+      matches.push(descriptor);
+      descriptorsById.set(descriptor.id, matches);
+    }
+    for (const [id, matches] of descriptorsById) {
+      if (!Object.hasOwn(copy.project.membership, id)) continue;
+      const hint = matches[0].hint;
+      if (!matches.every((descriptor) => sameThreadHint(descriptor.hint, hint))) continue;
       if (sameThreadHint(copy.project.threadHints[id], hint)) continue;
       copy.project.threadHints[id] = hint;
       changed = true;

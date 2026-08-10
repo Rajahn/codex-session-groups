@@ -10,6 +10,7 @@ const scriptPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(scriptPath), "..");
 const modelPath = path.join(projectRoot, "inject", "model.js");
 const uiPath = path.join(projectRoot, "inject", "session-groups.user.js");
+export const EXPECTED_UI_VERSION = "0.1.3";
 
 export function parseArgs(argv) {
   const options = {
@@ -47,13 +48,22 @@ export function parseArgs(argv) {
   return options;
 }
 
-export function isCodexTarget(target) {
+export function isCodexTarget(target, expectedPort = null) {
   if (!target || target.type !== "page" || !target.webSocketDebuggerUrl) return false;
-  if (!String(target.url || "").startsWith("app://")) return false;
-  const url = String(target.url || "");
-  return !url.includes("avatar-overlay")
-    && !url.includes("global-dictation")
-    && !url.includes("voice-mode");
+  let pageUrl;
+  let socketUrl;
+  try {
+    pageUrl = new URL(String(target.url || ""));
+    socketUrl = new URL(String(target.webSocketDebuggerUrl));
+  } catch (_) {
+    return false;
+  }
+  if (pageUrl.protocol !== "app:" || pageUrl.hostname !== "-" || pageUrl.pathname !== "/index.html") return false;
+  const route = `${pageUrl.pathname}${pageUrl.search}`;
+  if (["avatar-overlay", "global-dictation", "voice-mode"].some((marker) => route.includes(marker))) return false;
+  if (socketUrl.hostname !== "127.0.0.1" || socketUrl.protocol !== "ws:") return false;
+  if (expectedPort !== null && Number(socketUrl.port) !== expectedPort) return false;
+  return true;
 }
 
 function helpText() {
@@ -91,11 +101,11 @@ async function chooseLoopbackPort() {
   return port;
 }
 
-function launchCodex(appPath, port) {
+function launchCodex(appPath, port, waitForExit) {
   return spawn(
     "/usr/bin/open",
     [
-      "-W",
+      ...(waitForExit ? ["-W"] : []),
       "-a",
       appPath,
       "--args",
@@ -139,14 +149,23 @@ class CdpConnection {
   async open() {
     this.socket = new WebSocket(this.url);
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("CDP connection timed out")), 5_000);
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { this.socket?.close(); } catch (_) {}
+        reject(error);
+      };
+      const timer = setTimeout(() => fail(new Error("CDP connection timed out")), 5_000);
       this.socket.addEventListener("open", () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         resolve();
       }, { once: true });
       this.socket.addEventListener("error", () => {
-        clearTimeout(timer);
-        reject(new Error("CDP WebSocket connection failed"));
+        fail(new Error("CDP WebSocket connection failed"));
       }, { once: true });
     });
     this.socket.addEventListener("message", (event) => {
@@ -202,8 +221,8 @@ function assertEvaluation(result, label) {
 
 async function injectTarget(target, sources) {
   const connection = new CdpConnection(target.webSocketDebuggerUrl);
-  await connection.open();
   try {
+    await connection.open();
     await connection.send("Page.enable");
     await connection.send("Runtime.enable");
     await connection.send("Page.addScriptToEvaluateOnNewDocument", { source: sources.model });
@@ -228,10 +247,130 @@ async function injectTarget(target, sources) {
       expression: "({ version: globalThis.__CODEX_SESSION_GROUPS_V1__?.version || null, projectCount: document.querySelectorAll('[data-app-action-sidebar-project-row]').length })",
       returnByValue: true,
     });
-    return status.result?.value || { version: null, projectCount: 0 };
+    const value = status.result?.value || { version: null, projectCount: 0 };
+    if (value.version !== EXPECTED_UI_VERSION) {
+      throw new Error(`UI version verification failed: expected ${EXPECTED_UI_VERSION}, got ${value.version || "null"}`);
+    }
+    return value;
   } finally {
     connection.close();
   }
+}
+
+export async function runInjectionCycle(targets, injected, inject, sources) {
+  const liveIds = new Set(targets.map((target) => target.id));
+  for (const id of injected) {
+    if (!liveIds.has(id)) injected.delete(id);
+  }
+
+  const successes = [];
+  const failures = [];
+  for (const target of targets) {
+    if (injected.has(target.id)) continue;
+    try {
+      const status = await inject(target, sources);
+      if (status?.version !== EXPECTED_UI_VERSION) {
+        throw new Error(`UI version verification failed: expected ${EXPECTED_UI_VERSION}, got ${status?.version || "null"}`);
+      }
+      injected.add(target.id);
+      successes.push({ target, status });
+    } catch (error) {
+      failures.push({ target, error });
+    }
+  }
+  return { successes, failures };
+}
+
+export function childProcessFinished(child) {
+  return Boolean(child && (child.exitCode !== null || child.signalCode !== null));
+}
+
+export async function waitForNextPoll(delayMs, child = null) {
+  if (childProcessFinished(child)) return;
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child?.removeListener?.("exit", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    child?.once?.("exit", finish);
+  });
+}
+
+export async function runInjectionLoop({
+  watch,
+  pollMs,
+  port,
+  sources,
+  launchedProcess = null,
+  fetchTargetsFn = fetchTargets,
+  injectTargetFn = injectTarget,
+  sleepFn = waitForNextPoll,
+  isStopping = () => false,
+  now = Date.now,
+  onceTimeoutMs = 15_000,
+  logger = console,
+}) {
+  const injected = new Set();
+  const reportedTargetErrors = new Map();
+  let reportedFetchError = "";
+  const onceDeadline = now() + onceTimeoutMs;
+
+  while (!isStopping()) {
+    if (childProcessFinished(launchedProcess)) break;
+    let targets;
+    try {
+      targets = (await fetchTargetsFn(port)).filter((target) => isCodexTarget(target, port));
+      if (reportedFetchError) {
+        logger.log("Codex debugger connection recovered");
+        reportedFetchError = "";
+      }
+    } catch (error) {
+      if (childProcessFinished(launchedProcess)) break;
+      if (launchedProcess) {
+        await sleepFn(Math.min(pollMs, 250), launchedProcess);
+        if (childProcessFinished(launchedProcess)) break;
+      }
+      if (!watch && now() >= onceDeadline) {
+        throw new Error(`Timed out waiting for a usable Codex renderer: ${error.message}`);
+      }
+      if (reportedFetchError !== error.message) {
+        logger.warn(`Codex debugger temporarily unavailable: ${error.message}`);
+        reportedFetchError = error.message;
+      }
+      await sleepFn(watch ? pollMs : Math.min(pollMs, 500), launchedProcess);
+      continue;
+    }
+
+    const cycle = await runInjectionCycle(targets, injected, injectTargetFn, sources);
+    for (const { target, status } of cycle.successes) {
+      reportedTargetErrors.delete(target.id);
+      logger.log(`Injected session groups ${status.version} into Codex (${status.projectCount} projects visible)`);
+    }
+    for (const { target, error } of cycle.failures) {
+      if (reportedTargetErrors.get(target.id) === error.message) continue;
+      reportedTargetErrors.set(target.id, error.message);
+      logger.warn(`Session groups injection will retry for ${target.id}: ${error.message}`);
+    }
+
+    if (!watch) {
+      const allTargetsInjected = targets.length > 0 && targets.every((target) => injected.has(target.id));
+      if (allTargetsInjected) return { injected };
+      if (now() >= onceDeadline) {
+        const detail = cycle.failures.at(-1)?.error?.message || "no eligible Codex renderer target appeared";
+        throw new Error(`Timed out waiting for a usable Codex renderer: ${detail}`);
+      }
+      await sleepFn(Math.min(pollMs, 500), launchedProcess);
+      continue;
+    }
+
+    await sleepFn(pollMs, launchedProcess);
+  }
+  return { injected };
 }
 
 async function main() {
@@ -243,40 +382,32 @@ async function main() {
 
   let launchedProcess = null;
   const port = options.port || await chooseLoopbackPort();
+  const sources = {
+    model: await readFile(modelPath, "utf8"),
+    ui: await readFile(uiPath, "utf8"),
+  };
   if (options.launch) {
     if (codexIsRunning()) {
       throw new Error("Codex is already running. Quit it first, then run npm start again. Existing tasks are not affected.");
     }
     console.log(`Starting Codex with local session groups (debugger: 127.0.0.1:${port})`);
-    launchedProcess = launchCodex(options.appPath, port);
+    const launchHelper = launchCodex(options.appPath, port, options.watch);
+    launchHelper.unref();
+    if (options.watch) launchedProcess = launchHelper;
   }
 
   await waitForDebugger(port);
-  const sources = {
-    model: await readFile(modelPath, "utf8"),
-    ui: await readFile(uiPath, "utf8"),
-  };
-  const injected = new Set();
   let stopping = false;
   process.once("SIGINT", () => { stopping = true; });
   process.once("SIGTERM", () => { stopping = true; });
-
-  do {
-    const targets = (await fetchTargets(port)).filter(isCodexTarget);
-    const liveIds = new Set(targets.map((target) => target.id));
-    for (const id of injected) {
-      if (!liveIds.has(id)) injected.delete(id);
-    }
-    for (const target of targets) {
-      if (injected.has(target.id)) continue;
-      const status = await injectTarget(target, sources);
-      injected.add(target.id);
-      console.log(`Injected session groups ${status.version || "unknown"} into Codex (${status.projectCount} projects visible)`);
-    }
-    if (!options.watch) break;
-    if (launchedProcess && launchedProcess.exitCode !== null) break;
-    await new Promise((resolve) => setTimeout(resolve, options.pollMs));
-  } while (!stopping);
+  await runInjectionLoop({
+    watch: options.watch,
+    pollMs: options.pollMs,
+    port,
+    sources,
+    launchedProcess,
+    isStopping: () => stopping,
+  });
 }
 
 const isEntrypoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
