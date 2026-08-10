@@ -1,6 +1,6 @@
 {
   "name": "codex-session-groups",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Local-only visual session groups for the Codex desktop sidebar.",

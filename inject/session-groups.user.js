@@ -5,10 +5,12 @@
   const MODEL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
   const STORAGE_KEY = "codex-session-groups:v1";
   const STYLE_ID = "codex-session-groups-style-v1";
-  const VERSION = "0.1.3";
+  const VERSION = "0.1.5";
   const PROJECT_ROW_SELECTOR = "[data-app-action-sidebar-project-row]";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_ROW_SELECTOR = "[data-app-action-sidebar-thread-id]";
+  const MANAGED_THREAD_ROW_SELECTOR = '[data-csg-managed-thread-row="true"]';
+  const MANAGED_THREAD_WRAPPER_SELECTOR = '[data-csg-managed-thread-wrapper="true"]';
   const ARCHIVE_LABEL_PATTERN = /^(?:归档聊天|archive chat)$/i;
   const SHOW_ALL_LABEL_PATTERN = /^(?:展开显示|show more|show all)$/i;
 
@@ -31,10 +33,10 @@
   let groupMenu = null;
   let toastTimer = 0;
   const originalOrders = new WeakMap();
+  const orphanedManagedWrappers = new WeakSet();
   const touchedOrderElements = new Set();
   const membershipChecks = new Map();
   const groupRevealRuns = new Map();
-  const blockedTransientMigrations = new Set();
 
   const folderIcon = `
     <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -146,39 +148,66 @@
     return null;
   }
 
-  function transientMembershipContextForRow(row, preferredProjectId) {
+  function sameThreadHint(hint, descriptor) {
+    return Boolean(hint && descriptor
+      && hint.title === descriptor.title
+      && hint.hostId === descriptor.hostId
+      && hint.kind === descriptor.kind);
+  }
+
+  function transientAliasContextForRow(row, preferredProjectId) {
     const descriptor = threadDescriptorForRow(row);
     if (!preferredProjectId || !descriptor || model.isTransientThreadId(descriptor.id)) return null;
+    if (row.dataset.csgProjectId !== preferredProjectId) return null;
+    const handle = row.querySelector(":scope > .csg-drag-handle[data-csg-thread-id]");
+    if (!handle || handle.dataset.csgProjectId !== preferredProjectId) return null;
+    const threadId = handle.dataset.csgThreadId?.trim() || "";
+    if (!model.isTransientThreadId(threadId) || threadId === descriptor.id) return null;
     const config = projectConfig(preferredProjectId);
-    const candidates = Object.entries(config.membership).filter(([threadId]) => {
-      if (!model.isTransientThreadId(threadId)) return false;
-      const hint = config.threadHints[threadId];
-      return Boolean(hint
-        && hint.title === descriptor.title
-        && hint.hostId === descriptor.hostId
-        && hint.kind === descriptor.kind);
-    });
-    if (candidates.length === 0) return null;
-
-    const list = projectList(preferredProjectId);
-    const matchingRows = threadRowsAnywhere().filter((candidateRow) => {
-      const candidate = threadDescriptorForRow(candidateRow);
-      return Boolean(candidate
-        && candidate.title === descriptor.title
-        && candidate.hostId === descriptor.hostId
-        && candidate.kind === descriptor.kind);
-    });
-    const uniqueTarget = list?.getAttribute("data-app-action-sidebar-project-show-all") === "true"
-      && matchingRows.length === 1
-      && matchingRows[0] === row;
-    if (candidates.length !== 1 || !uniqueTarget) {
-      candidates.forEach(([threadId]) => {
-        blockedTransientMigrations.add(membershipKey(preferredProjectId, threadId));
-      });
-      return null;
-    }
-    const [threadId, groupId] = candidates[0];
+    const groupId = config.membership[threadId] || "";
+    if (!groupId || row.dataset.csgGroupId !== groupId) return null;
+    if (!sameThreadHint(config.threadHints[threadId], descriptor)) return null;
     return { projectId: preferredProjectId, threadId, groupId };
+  }
+
+  function matchingTransientMembershipSourcesForRow(row, preferredProjectId) {
+    const descriptor = threadDescriptorForRow(row);
+    if (!descriptor || model.isTransientThreadId(descriptor.id)) return [];
+    const projectIds = preferredProjectId ? [preferredProjectId] : Object.keys(state.projects);
+    return projectIds.flatMap((projectId) => {
+      const config = projectConfig(projectId);
+      return Object.keys(config.membership)
+        .filter((threadId) => (
+          model.isTransientThreadId(threadId)
+          && sameThreadHint(config.threadHints[threadId], descriptor)
+        ))
+        .map((threadId) => ({ projectId, threadId }));
+    });
+  }
+
+  function blockFingerprintMigrationSources(row, preferredProjectId) {
+    const sources = matchingTransientMembershipSourcesForRow(row, preferredProjectId);
+    if (sources.length === 0) return [];
+    const threadIdsByProject = new Map();
+    sources.forEach(({ projectId, threadId }) => {
+      const threadIds = threadIdsByProject.get(projectId) || [];
+      threadIds.push(threadId);
+      threadIdsByProject.set(projectId, threadIds);
+    });
+    let nextState = state;
+    const blocked = [];
+    threadIdsByProject.forEach((threadIds, projectId) => {
+      const result = model.blockThreadMigrations(
+        nextState,
+        projectId,
+        threadIds,
+        "ambiguous-archive-target",
+      );
+      nextState = result.state;
+      blocked.push(...result.threadIds.map((threadId) => ({ projectId, threadId })));
+    });
+    if (blocked.length > 0) saveState(nextState);
+    return blocked;
   }
 
   function threadExistsAnywhere(threadId) {
@@ -205,12 +234,6 @@
   }
 
   function syncProjectThreadIdentities(projectId, list, nativeRows) {
-    blockedTransientMigrations.forEach((key) => {
-      const prefix = `${projectId}\u0000`;
-      if (!key.startsWith(prefix)) return;
-      const threadId = key.slice(prefix.length);
-      if (!projectConfig(projectId).membership[threadId]) blockedTransientMigrations.delete(key);
-    });
     const ownRows = new Set(nativeRows.map(({ row }) => row));
     const descriptors = [
       ...nativeRows.map(({ row }) => ({ ...threadDescriptorForRow(row), migrationTarget: true })),
@@ -222,11 +245,7 @@
     const hasMissingStableMembership = Object.keys(projectConfig(projectId).membership).some(
       (threadId) => !model.isTransientThreadId(threadId) && !renderedIds.has(threadId),
     );
-    const hasBlockedTransientMigration = Object.keys(projectConfig(projectId).membership).some(
-      (threadId) => blockedTransientMigrations.has(membershipKey(projectId, threadId)),
-    );
     const allowMigration = !hasMissingStableMembership
-      && !hasBlockedTransientMigration
       && list?.getAttribute("data-app-action-sidebar-project-show-all") === "true";
     const result = model.syncThreadIdentities(state, projectId, descriptors, allowMigration);
     if (!result.changed) return result;
@@ -404,15 +423,47 @@
   }
 
   function restoreThreadRow(row, wrapper) {
-    row.classList.remove("csg-grouped-thread", "csg-thread-row", "csg-dragging");
-    row.removeAttribute("data-csg-project-id");
-    row.removeAttribute("data-csg-group-id");
-    row.removeAttribute("data-csg-drop-active");
-    row.querySelector(":scope > .csg-drag-handle")?.remove();
+    if (row) {
+      row.classList.remove("csg-grouped-thread", "csg-thread-row", "csg-dragging");
+      row.removeAttribute("data-csg-project-id");
+      row.removeAttribute("data-csg-group-id");
+      row.removeAttribute("data-csg-drop-active");
+      row.removeAttribute("data-csg-managed-thread-row");
+      row.querySelector(":scope > .csg-drag-handle")?.remove();
+    }
     if (wrapper) {
       wrapper.removeAttribute("data-csg-hidden");
+      wrapper.removeAttribute("data-csg-managed-thread-wrapper");
       if (originalOrders.has(wrapper)) wrapper.style.order = originalOrders.get(wrapper);
     }
+  }
+
+  function restoreManagedThreadRows(root = document) {
+    const restoredRows = new Set();
+    root.querySelectorAll?.(MANAGED_THREAD_WRAPPER_SELECTOR).forEach((wrapper) => {
+      const row = wrapper.querySelector(MANAGED_THREAD_ROW_SELECTOR);
+      if (row) restoredRows.add(row);
+      restoreThreadRow(row, wrapper);
+    });
+    root.querySelectorAll?.(MANAGED_THREAD_ROW_SELECTOR).forEach((row) => {
+      if (restoredRows.has(row)) return;
+      restoreThreadRow(row, row.closest('[role="listitem"]'));
+    });
+  }
+
+  function restoreOrphanedManagedThreadRows(root = document) {
+    const restoredRows = new Set();
+    root.querySelectorAll?.(MANAGED_THREAD_WRAPPER_SELECTOR).forEach((wrapper) => {
+      const row = wrapper.querySelector(MANAGED_THREAD_ROW_SELECTOR);
+      if (row?.matches(THREAD_ROW_SELECTOR)) return;
+      if (row) restoredRows.add(row);
+      orphanedManagedWrappers.add(wrapper);
+      restoreThreadRow(row, wrapper);
+    });
+    root.querySelectorAll?.(MANAGED_THREAD_ROW_SELECTOR).forEach((row) => {
+      if (restoredRows.has(row) || row.matches(THREAD_ROW_SELECTOR)) return;
+      restoreThreadRow(row, row.closest('[role="listitem"]'));
+    });
   }
 
   function renderProject(nativeProjectRow) {
@@ -444,6 +495,7 @@
     if (config.groups.length === 0) {
       resetProjectMembersReveal(projectId);
       Array.from(stack.querySelectorAll(":scope > .csg-group-item")).forEach((item) => item.remove());
+      restoreManagedThreadRows(stack);
       nativeRows.forEach(({ row, wrapper }) => restoreThreadRow(row, wrapper));
       Array.from(stack.children).forEach((child) => {
         if (originalOrders.has(child)) child.style.order = originalOrders.get(child);
@@ -469,6 +521,7 @@
     }
 
     if (availability.incomplete) {
+      restoreManagedThreadRows(stack);
       nativeRows.forEach(({ row, wrapper }) => restoreThreadRow(row, wrapper));
       Array.from(stack.children).forEach((child) => {
         if (child.matches?.(".csg-group-item")) return;
@@ -485,6 +538,8 @@
       const groupIndex = config.groups.findIndex((group) => group.id === assignedGroupId);
       const assignedGroup = groupIndex >= 0 ? config.groups[groupIndex] : null;
       const orderBase = assignedGroup ? groupIndex * 10_000 + 100 : config.groups.length * 10_000 + 100;
+      wrapper.dataset.csgManagedThreadWrapper = "true";
+      row.dataset.csgManagedThreadRow = "true";
       wrapper.style.order = String(orderBase + nativeIndex);
       if (assignedGroup?.collapsed) wrapper.dataset.csgHidden = "true";
       else wrapper.removeAttribute("data-csg-hidden");
@@ -497,6 +552,10 @@
 
     Array.from(stack.children).forEach((child, index) => {
       if (child.matches?.(".csg-group-item") || child.querySelector?.(THREAD_ROW_SELECTOR)) return;
+      if (orphanedManagedWrappers.has(child)) {
+        if (originalOrders.has(child)) child.style.order = originalOrders.get(child);
+        return;
+      }
       if (!originalOrders.has(child)) originalOrders.set(child, child.style.order || "");
       touchedOrderElements.add(child);
       child.style.order = String(900_000 + index);
@@ -763,6 +822,7 @@
   }
 
   function pruneRuntimeTrackers() {
+    restoreOrphanedManagedThreadRows(document);
     touchedOrderElements.forEach((element) => {
       if (!element?.isConnected) touchedOrderElements.delete(element);
     });
@@ -969,9 +1029,11 @@
       const preferredProjectId = threadRow?.closest(PROJECT_LIST_SELECTOR)
         ?.getAttribute("data-app-action-sidebar-project-list-id") || threadRow?.dataset.csgProjectId || "";
       const context = membershipContext(threadId, preferredProjectId)
-        || transientMembershipContextForRow(threadRow, preferredProjectId);
+        || transientAliasContextForRow(threadRow, preferredProjectId);
       if (context) {
         scheduleArchiveReconciliation(context.projectId, context.threadId, context.groupId, threadId);
+      } else {
+        blockFingerprintMigrationSources(threadRow, preferredProjectId);
       }
     }
 
@@ -1114,10 +1176,10 @@
     membershipChecks.clear();
     groupRevealRuns.forEach((run) => window.clearTimeout(run.timer));
     groupRevealRuns.clear();
-    blockedTransientMigrations.clear();
     document.querySelector(".csg-toast")?.remove();
     document.getElementById(STYLE_ID)?.remove();
     document.querySelectorAll(".csg-group-item").forEach((item) => item.remove());
+    restoreManagedThreadRows(document);
     document.querySelectorAll(THREAD_ROW_SELECTOR).forEach((row) => {
       restoreThreadRow(row, row.closest('[role="listitem"]'));
     });

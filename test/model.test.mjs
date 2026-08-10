@@ -27,12 +27,33 @@ test("replaces an older injected model implementation", () => {
     },
   });
   vm.runInContext(source, staleContext);
-  assert.equal(staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.IMPLEMENTATION_VERSION, "0.1.3");
+  assert.equal(staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.IMPLEMENTATION_VERSION, "0.1.5");
   assert.equal(typeof staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.unassignThreads, "function");
 });
 
+test("replaces a same-version model that lacks durable migration blocks", () => {
+  const staleContext = vm.createContext({
+    Date,
+    Math,
+    Object,
+    Set,
+    String,
+    globalThis: {
+      __CODEX_SESSION_GROUPS_MODEL_V1__: Object.freeze({
+        VERSION: 1,
+        IMPLEMENTATION_VERSION: "0.1.5",
+      }),
+    },
+  });
+  vm.runInContext(source, staleContext);
+  assert.equal(
+    typeof staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.blockThreadMigrations,
+    "function",
+  );
+});
+
 test("normalizes malformed state without retaining invalid memberships", () => {
-  assert.equal(model.IMPLEMENTATION_VERSION, "0.1.3");
+  assert.equal(model.IMPLEMENTATION_VERSION, "0.1.5");
   const state = model.normalizeState({
     projects: {
       project: {
@@ -153,8 +174,12 @@ test("does not guess a new id when the title match is ambiguous or the list is p
   ];
 
   const ambiguous = model.syncThreadIdentities(state, "project", candidates, true);
-  assert.equal(ambiguous.changed, false);
+  assert.equal(ambiguous.changed, true);
   assert.equal(ambiguous.state.projects.project.membership["local:client-new-thread:temp-1"], "group-a");
+  assert.equal(
+    ambiguous.state.projects.project.migrationBlocks["local:client-new-thread:temp-1"].reason,
+    "ambiguous-source-targets",
+  );
 
   const partial = model.syncThreadIdentities(state, "project", [candidates[0]], false);
   assert.equal(partial.changed, false);
@@ -307,4 +332,131 @@ test("supports reserved object keys without prototype collisions", () => {
   assert.equal(roundTripped.projects.__proto__.membership.__proto__, "constructor");
   const unassigned = model.unassignThreads(roundTripped, "__proto__", ["__proto__"]);
   assert.equal(Object.hasOwn(unassigned.state.projects.__proto__.membership, "__proto__"), false);
+});
+
+test("persists only safe transient migration blocks across JSON normalization", () => {
+  const projectId = "__proto__";
+  const transientId = "local:client-new-thread:__proto__";
+  const stableId = "local:stable";
+  let state = model.createGroup(model.emptyState(), projectId, "Reserved", "constructor").state;
+  state = model.assignThread(state, projectId, transientId, "constructor", {
+    title: "Transient",
+    hostId: "local",
+    kind: "local",
+  }).state;
+  state = model.assignThread(state, projectId, stableId, "constructor", {
+    title: "Stable",
+    hostId: "local",
+    kind: "local",
+  }).state;
+
+  const blocked = model.blockThreadMigrations(
+    state,
+    projectId,
+    [transientId, stableId, "local:missing"],
+    "  ambiguous   archive target  ",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(blocked.threadIds)), [transientId]);
+  assert.equal(Object.getPrototypeOf(blocked.state.projects[projectId].migrationBlocks), null);
+  assert.equal(blocked.state.projects[projectId].migrationBlocks[transientId].reason, "ambiguous archive target");
+  assert.ok(blocked.state.projects[projectId].migrationBlocks[transientId].createdAt > 0);
+
+  const serialized = JSON.parse(JSON.stringify(blocked.state));
+  serialized.projects[projectId].migrationBlocks[transientId].ignored = "unsafe";
+  serialized.projects[projectId].migrationBlocks[stableId] = { reason: "stable", createdAt: 1 };
+  serialized.projects[projectId].migrationBlocks["local:client-new-thread:orphan"] = {
+    reason: "orphan",
+    createdAt: 1,
+  };
+  const roundTripped = model.normalizeState(serialized);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(roundTripped.projects[projectId].migrationBlocks)),
+    {
+      [transientId]: {
+        reason: "ambiguous archive target",
+        createdAt: blocked.state.projects[projectId].migrationBlocks[transientId].createdAt,
+      },
+    },
+  );
+  assert.equal(Object.getPrototypeOf(roundTripped.projects[projectId].migrationBlocks), null);
+
+  const unassigned = model.unassignThreads(roundTripped, projectId, [transientId]);
+  assert.equal(Object.hasOwn(unassigned.state.projects[projectId].migrationBlocks, transientId), false);
+  const deleted = model.deleteGroup(blocked.state, projectId, "constructor");
+  assert.equal(deleted.state.projects[projectId], undefined);
+});
+
+test("a durable ambiguity block prevents migration after candidates decrease", () => {
+  const transientId = "local:client-new-thread:temp-durable";
+  const hint = { title: "Duplicate", hostId: "local", kind: "local" };
+  let state = model.createGroup(model.emptyState(), "project", "A", "group-a").state;
+  state = model.assignThread(state, "project", transientId, "group-a", hint).state;
+
+  const ambiguous = model.syncThreadIdentities(state, "project", [
+    { id: "local:stable-a", ...hint },
+    { id: "local:stable-b", ...hint },
+  ], true);
+  assert.equal(ambiguous.changed, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(ambiguous.migrations)), []);
+  assert.equal(
+    ambiguous.state.projects.project.migrationBlocks[transientId].reason,
+    "ambiguous-source-targets",
+  );
+
+  const restarted = model.normalizeState(JSON.parse(JSON.stringify(ambiguous.state)));
+  const reduced = model.syncThreadIdentities(restarted, "project", [{
+    id: "local:stable-b",
+    ...hint,
+  }], true);
+  assert.deepEqual(JSON.parse(JSON.stringify(reduced.migrations)), []);
+  assert.equal(reduced.state.projects.project.membership[transientId], "group-a");
+  assert.equal(reduced.state.projects.project.membership["local:stable-b"], undefined);
+  assert.equal(reduced.state.projects.project.migrationBlocks[transientId].reason, "ambiguous-source-targets");
+});
+
+test("blocks real graph ambiguity but not zero or unique external targets", () => {
+  const makeState = (ids, hint) => {
+    let state = model.createGroup(model.emptyState(), "project", "A", "group-a").state;
+    for (const id of ids) state = model.assignThread(state, "project", id, "group-a", hint).state;
+    return state;
+  };
+  const hint = { title: "Task", hostId: "local", kind: "local" };
+  const first = "local:client-new-thread:first";
+  const second = "local:client-new-thread:second";
+
+  const zero = model.syncThreadIdentities(makeState([first], hint), "project", [], true);
+  assert.deepEqual(JSON.parse(JSON.stringify(zero.state.projects.project.migrationBlocks)), {});
+
+  const external = model.syncThreadIdentities(makeState([first], hint), "project", [{
+    id: "local:pinned",
+    ...hint,
+    migrationTarget: false,
+  }], true);
+  assert.deepEqual(JSON.parse(JSON.stringify(external.state.projects.project.migrationBlocks)), {});
+
+  const sharedExternal = model.syncThreadIdentities(makeState([first, second], hint), "project", [{
+    id: "local:pinned-shared",
+    ...hint,
+    migrationTarget: false,
+  }], true);
+  assert.equal(sharedExternal.state.projects.project.migrationBlocks[first].reason, "ambiguous-target-sources");
+  assert.equal(sharedExternal.state.projects.project.migrationBlocks[second].reason, "ambiguous-target-sources");
+
+  let groupedState = makeState([first], hint);
+  groupedState = model.assignThread(groupedState, "project", "local:grouped", "group-a", hint).state;
+  const grouped = model.syncThreadIdentities(groupedState, "project", [{ id: "local:grouped", ...hint }], true);
+  assert.equal(grouped.state.projects.project.migrationBlocks[first].reason, "ambiguous-grouped-target");
+
+  const duplicate = model.syncThreadIdentities(makeState([first], hint), "project", [
+    { id: "local:duplicate", ...hint },
+    { id: "local:duplicate", title: "Other", hostId: "local", kind: "local" },
+  ], true);
+  assert.equal(duplicate.state.projects.project.migrationBlocks[first].reason, "ambiguous-duplicate-target");
+
+  const shared = model.syncThreadIdentities(makeState([first, second], hint), "project", [{
+    id: "local:shared",
+    ...hint,
+  }], true);
+  assert.equal(shared.state.projects.project.migrationBlocks[first].reason, "ambiguous-target-sources");
+  assert.equal(shared.state.projects.project.migrationBlocks[second].reason, "ambiguous-target-sources");
 });

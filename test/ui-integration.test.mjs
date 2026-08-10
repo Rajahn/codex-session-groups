@@ -10,6 +10,11 @@ const groupId = "group-a";
 
 const delay = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitFor(predicate, timeoutMs = 1_500) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await delay(20);
+}
+
 function descriptor(id, title = id) {
   return { id, title, hostId: "local", kind: "local" };
 }
@@ -138,6 +143,56 @@ test("incomplete native rows fail open and recover when Codex loads them", async
   window.close();
 });
 
+test("a managed hidden row fails open after losing its native thread id", async () => {
+  const member = descriptor("local:loses-native-id");
+  const { window, stack } = boot([member], [member], {
+    collapsed: true,
+    showAll: "true",
+    externalThreads: [member],
+  });
+  await delay();
+
+  const row = stack.querySelector(`[data-app-action-sidebar-thread-id="${member.id}"]`);
+  const wrapper = row.closest('[role="listitem"]');
+  assert.equal(wrapper.getAttribute("data-csg-hidden"), "true");
+  assert.equal(wrapper.getAttribute("data-csg-managed-thread-wrapper"), "true");
+  assert.equal(row.getAttribute("data-csg-managed-thread-row"), "true");
+  assert.ok(row.querySelector(":scope > .csg-drag-handle"));
+
+  row.removeAttribute("data-app-action-sidebar-thread-id");
+  await delay(80);
+
+  assert.equal(wrapper.hasAttribute("data-csg-hidden"), false);
+  assert.equal(wrapper.hasAttribute("data-csg-managed-thread-wrapper"), false);
+  assert.equal(wrapper.style.order, "");
+  assert.equal(row.hasAttribute("data-csg-managed-thread-row"), false);
+  assert.equal(row.classList.contains("csg-grouped-thread"), false);
+  assert.equal(row.classList.contains("csg-thread-row"), false);
+  assert.equal(row.querySelector(":scope > .csg-drag-handle"), null);
+  api(window).destroy();
+  window.close();
+});
+
+test("destroy cleans a managed hidden row after its native thread id disappears", async () => {
+  const member = descriptor("local:destroy-after-id-loss");
+  const { window, stack } = boot([member], [member], { collapsed: true, showAll: "true" });
+  await delay();
+
+  const row = stack.querySelector(`[data-app-action-sidebar-thread-id="${member.id}"]`);
+  const wrapper = row.closest('[role="listitem"]');
+  row.removeAttribute("data-app-action-sidebar-thread-id");
+  api(window).destroy();
+
+  assert.equal(wrapper.hasAttribute("data-csg-hidden"), false);
+  assert.equal(wrapper.hasAttribute("data-csg-managed-thread-wrapper"), false);
+  assert.equal(wrapper.style.order, "");
+  assert.equal(row.hasAttribute("data-csg-managed-thread-row"), false);
+  assert.equal(row.classList.contains("csg-grouped-thread"), false);
+  assert.equal(row.classList.contains("csg-thread-row"), false);
+  assert.equal(row.querySelector(":scope > .csg-drag-handle"), null);
+  window.close();
+});
+
 test("a remounted or reset native list can reveal members again", async () => {
   const members = [descriptor("local:t1"), descriptor("local:t2"), descriptor("local:t3")];
   let firstClicks = 0;
@@ -151,7 +206,9 @@ test("a remounted or reset native list can reveal members again", async () => {
       stack.appendChild(makeThreadWrapper(first.window, members[2]));
     },
   });
-  await delay(250);
+  await first.window.happyDOM.waitUntilComplete();
+  await waitFor(() => firstClicks === 1
+    && first.stack.querySelector(".csg-group-count")?.textContent === "3");
   assert.equal(firstClicks, 1);
   assert.equal(first.stack.querySelector(".csg-group-count").textContent, "3");
 
@@ -168,7 +225,9 @@ test("a remounted or reset native list can reveal members again", async () => {
     },
   });
   first.window.document.body.appendChild(second.list);
-  await delay(300);
+  await first.window.happyDOM.waitUntilComplete();
+  await waitFor(() => secondClicks === 1
+    && second.stack.querySelector(".csg-group-count")?.textContent === "3");
   assert.equal(secondClicks, 1);
   assert.equal(second.stack.querySelector(".csg-group-count").textContent, "3");
 
@@ -189,7 +248,9 @@ test("a remounted or reset native list can reveal members again", async () => {
   });
   controlItem.appendChild(control);
   second.stack.appendChild(controlItem);
-  await delay(300);
+  await first.window.happyDOM.waitUntilComplete();
+  await waitFor(() => resetClicks === 1
+    && second.stack.querySelector(".csg-group-count")?.textContent === "3");
   assert.equal(resetClicks, 1);
   assert.equal(second.stack.querySelector(".csg-group-count").textContent, "3");
 
@@ -243,6 +304,7 @@ test("archive intent resolves a stable row before identity render runs", async (
 
   row.setAttribute("data-app-action-sidebar-thread-id", stable.id);
   archive.click();
+  assert.equal(api(window).getDiagnostics().membershipChecks, 1);
   wrapper.remove();
   await delay(900);
 
@@ -254,7 +316,7 @@ test("archive intent resolves a stable row before identity render runs", async (
   window.close();
 });
 
-test("reverse archive fails closed with two matching stable rows in the project", async () => {
+test("an ambiguous reverse archive stays blocked across a renderer restart", async () => {
   const temporary = descriptor("local:client-new-thread:temp-ambiguous", "Ambiguous reverse task");
   const stableA = descriptor("local:stable-ambiguous-a", "Ambiguous reverse task");
   const stableB = descriptor("local:stable-ambiguous-b", "Ambiguous reverse task");
@@ -267,16 +329,35 @@ test("reverse archive fails closed with two matching stable rows in the project"
   row.appendChild(archive);
   archive.click();
   assert.equal(api(window).getDiagnostics().membershipChecks, 0);
+  assert.equal(
+    api(window).getState().projects[projectId].migrationBlocks[temporary.id].reason,
+    "ambiguous-archive-target",
+  );
   row.closest('[role="listitem"]').remove();
   await delay(200);
 
-  const membership = api(window).getState().projects[projectId].membership;
+  const firstState = api(window).getState();
+  const membership = firstState.projects[projectId].membership;
   assert.equal(membership[temporary.id], groupId);
   assert.equal(membership[stableA.id], undefined);
   assert.equal(membership[stableB.id], undefined);
   assert.equal(api(window).getDiagnostics().membershipChecks, 0);
+  const persisted = JSON.parse(window.localStorage.getItem("codex-session-groups:v1"));
   api(window).destroy();
   window.close();
+
+  const restarted = boot([], [stableB], { showAll: "true", state: persisted });
+  await delay(200);
+  const restartedProject = api(restarted.window).getState().projects[projectId];
+  assert.equal(restartedProject.membership[temporary.id], groupId);
+  assert.equal(restartedProject.membership[stableA.id], undefined);
+  assert.equal(restartedProject.membership[stableB.id], undefined);
+  assert.equal(
+    restartedProject.migrationBlocks[temporary.id].reason,
+    "ambiguous-archive-target",
+  );
+  api(restarted.window).destroy();
+  restarted.window.close();
 });
 
 test("reverse archive fails closed when a pinned row matches the stable target", async () => {
@@ -295,6 +376,10 @@ test("reverse archive fails closed when a pinned row matches the stable target",
   row.appendChild(archive);
   archive.click();
   assert.equal(api(window).getDiagnostics().membershipChecks, 0);
+  assert.equal(
+    api(window).getState().projects[projectId].migrationBlocks[temporary.id].reason,
+    "ambiguous-archive-target",
+  );
   row.closest('[role="listitem"]').remove();
   await delay(200);
 
@@ -305,6 +390,45 @@ test("reverse archive fails closed when a pinned row matches the stable target",
   assert.equal(api(window).getDiagnostics().membershipChecks, 0);
   api(window).destroy();
   window.close();
+});
+
+test("archiving a pinned stable row durably blocks a stale transient mapping", async () => {
+  const temporary = descriptor("local:client-new-thread:temp-pinned-archive", "Pinned archive task");
+  const pinned = descriptor("local:stable-pinned-archive", "Pinned archive task");
+  const first = boot([temporary], [], {
+    showAll: "true",
+    externalThreads: [pinned],
+  });
+  await delay();
+
+  const row = first.window.document.querySelector(
+    `[data-app-action-sidebar-thread-id="${pinned.id}"]`,
+  );
+  assert.equal(row.closest("[data-app-action-sidebar-project-list-id]"), null);
+  const archive = first.window.document.createElement("button");
+  archive.setAttribute("aria-label", "归档聊天");
+  row.appendChild(archive);
+  archive.click();
+  assert.equal(api(first.window).getDiagnostics().membershipChecks, 0);
+  assert.equal(
+    api(first.window).getState().projects[projectId].migrationBlocks[temporary.id].reason,
+    "ambiguous-archive-target",
+  );
+  row.closest('[role="listitem"]').remove();
+  await delay(100);
+
+  const persisted = JSON.parse(first.window.localStorage.getItem("codex-session-groups:v1"));
+  api(first.window).destroy();
+  first.window.close();
+
+  const restarted = boot([], [pinned], { showAll: "true", state: persisted });
+  await delay(200);
+  const project = api(restarted.window).getState().projects[projectId];
+  assert.equal(project.membership[temporary.id], groupId);
+  assert.equal(project.membership[pinned.id], undefined);
+  assert.equal(project.migrationBlocks[temporary.id].reason, "ambiguous-archive-target");
+  api(restarted.window).destroy();
+  restarted.window.close();
 });
 
 test("a pinned duplicate blocks temporary id migration", async () => {

@@ -2,12 +2,14 @@
   "use strict";
 
   const GLOBAL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
-  const IMPLEMENTATION_VERSION = "0.1.3";
+  const IMPLEMENTATION_VERSION = "0.1.5";
   const VERSION = 1;
   const MAX_NAME_LENGTH = 60;
   const MAX_THREAD_TITLE_LENGTH = 500;
+  const MAX_MIGRATION_BLOCK_REASON_LENGTH = 120;
 
-  if (globalThis[GLOBAL_KEY]?.IMPLEMENTATION_VERSION === IMPLEMENTATION_VERSION) return;
+  if (globalThis[GLOBAL_KEY]?.IMPLEMENTATION_VERSION === IMPLEMENTATION_VERSION
+    && typeof globalThis[GLOBAL_KEY]?.blockThreadMigrations === "function") return;
 
   function dictionary() {
     return Object.create(null);
@@ -32,6 +34,18 @@
     const hostId = text(value.hostId).slice(0, 100);
     const kind = text(value.kind).slice(0, 100);
     return { title, hostId, kind };
+  }
+
+  function migrationBlockReason(value) {
+    return text(value).replace(/\s+/g, " ").slice(0, MAX_MIGRATION_BLOCK_REASON_LENGTH);
+  }
+
+  function migrationBlock(value) {
+    if (!value || typeof value !== "object") return null;
+    const reason = migrationBlockReason(value.reason);
+    if (!reason) return null;
+    const createdAt = Number.isFinite(value.createdAt) && value.createdAt >= 0 ? value.createdAt : 0;
+    return { reason, createdAt };
   }
 
   function sameThreadHint(left, right) {
@@ -101,8 +115,22 @@
         }
       }
 
+      const migrationBlocks = dictionary();
+      if (rawProject.migrationBlocks && typeof rawProject.migrationBlocks === "object") {
+        for (const [rawThreadId, rawBlock] of Object.entries(rawProject.migrationBlocks)) {
+          const threadId = text(rawThreadId);
+          const block = migrationBlock(rawBlock);
+          if (threadId
+            && Object.hasOwn(membership, threadId)
+            && isTransientThreadId(threadId)
+            && block) {
+            migrationBlocks[threadId] = block;
+          }
+        }
+      }
+
       if (groups.length > 0 || Object.keys(membership).length > 0) {
-        next.projects[projectId] = { groups, membership, threadHints };
+        next.projects[projectId] = { groups, membership, threadHints, migrationBlocks };
       }
     }
     return next;
@@ -113,7 +141,12 @@
     const id = text(projectId);
     if (!id) throw new Error("projectId is required");
     if (!Object.hasOwn(normalized.projects, id)) {
-      normalized.projects[id] = { groups: [], membership: dictionary(), threadHints: dictionary() };
+      normalized.projects[id] = {
+        groups: [],
+        membership: dictionary(),
+        threadHints: dictionary(),
+        migrationBlocks: dictionary(),
+      };
     }
     return { state: normalized, project: normalized.projects[id], projectId: id };
   }
@@ -185,6 +218,7 @@
     if (!targetGroupId) {
       delete copy.project.membership[taskId];
       delete copy.project.threadHints[taskId];
+      delete copy.project.migrationBlocks[taskId];
       return { state: copy.state, groupId: null };
     }
     if (!copy.project.groups.some((group) => group.id === targetGroupId)) {
@@ -210,12 +244,45 @@
       if (!Object.hasOwn(project.membership, threadId)) continue;
       delete project.membership[threadId];
       delete project.threadHints[threadId];
+      delete project.migrationBlocks[threadId];
       removed.push(threadId);
     }
     if (project.groups.length === 0 && Object.keys(project.membership).length === 0) {
       delete normalized.projects[id];
     }
     return { state: normalized, threadIds: removed };
+  }
+
+  function setMigrationBlock(project, threadId, reason, now = Date.now()) {
+    if (!Object.hasOwn(project.membership, threadId) || !isTransientThreadId(threadId)) return false;
+    const normalizedReason = migrationBlockReason(reason) || "ambiguous-identity";
+    const existing = project.migrationBlocks[threadId];
+    if (existing?.reason === normalizedReason) return false;
+    project.migrationBlocks[threadId] = {
+      reason: normalizedReason,
+      createdAt: Number.isFinite(existing?.createdAt) ? existing.createdAt : now,
+    };
+    return true;
+  }
+
+  function blockThreadMigrations(state, projectId, threadIds, reason = "ambiguous-identity") {
+    const normalized = normalizeState(state);
+    const id = text(projectId);
+    if (!id) throw new Error("projectId is required");
+    const project = normalized.projects[id];
+    if (!project) return { state: normalized, threadIds: [] };
+
+    const requested = new Set(
+      Array.from(threadIds || [], (threadId) => text(threadId)).filter(Boolean),
+    );
+    const blocked = [];
+    const now = Date.now();
+    for (const threadId of requested) {
+      if (!Object.hasOwn(project.membership, threadId) || !isTransientThreadId(threadId)) continue;
+      setMigrationBlock(project, threadId, reason, now);
+      blocked.push(threadId);
+    }
+    return { state: normalized, threadIds: blocked };
   }
 
   function syncThreadIdentities(state, projectId, renderedThreads, allowMigration = false) {
@@ -247,6 +314,7 @@
         isTransientThreadId(threadId)
         && !renderedIds.has(threadId)
         && copy.project.threadHints[threadId]
+        && !Object.hasOwn(copy.project.migrationBlocks, threadId)
       )).map(([id, groupId]) => ({
         id,
         groupId,
@@ -269,16 +337,32 @@
       const plannedMigrations = [];
       for (const source of staleSources) {
         const targets = targetsBySource.get(source.id) || [];
-        if (targets.length !== 1) continue;
+        if (targets.length === 0) continue;
+        if (targets.length > 1) {
+          if (setMigrationBlock(copy.project, source.id, "ambiguous-source-targets")) changed = true;
+          continue;
+        }
         const target = targets[0];
-        if ((sourcesByTarget.get(target.id) || []).length !== 1) continue;
-        if (target.duplicateId || !target.migrationTarget || Object.hasOwn(copy.project.membership, target.id)) continue;
+        if (target.duplicateId) {
+          if (setMigrationBlock(copy.project, source.id, "ambiguous-duplicate-target")) changed = true;
+          continue;
+        }
+        if (Object.hasOwn(copy.project.membership, target.id)) {
+          if (setMigrationBlock(copy.project, source.id, "ambiguous-grouped-target")) changed = true;
+          continue;
+        }
+        if ((sourcesByTarget.get(target.id) || []).length !== 1) {
+          if (setMigrationBlock(copy.project, source.id, "ambiguous-target-sources")) changed = true;
+          continue;
+        }
+        if (!target.migrationTarget) continue;
         plannedMigrations.push({ source, target });
       }
 
       for (const { source, target } of plannedMigrations) {
         delete copy.project.membership[source.id];
         delete copy.project.threadHints[source.id];
+        delete copy.project.migrationBlocks[source.id];
         copy.project.membership[target.id] = source.groupId;
         copy.project.threadHints[target.id] = target.hint;
         migrations.push({
@@ -316,6 +400,7 @@
       if (assignedGroupId !== id) continue;
       delete copy.project.membership[threadId];
       delete copy.project.threadHints[threadId];
+      delete copy.project.migrationBlocks[threadId];
     }
     if (copy.project.groups.length === 0 && Object.keys(copy.project.membership).length === 0) {
       delete copy.state.projects[copy.projectId];
@@ -328,6 +413,7 @@
     VERSION,
     MAX_NAME_LENGTH,
     MAX_THREAD_TITLE_LENGTH,
+    MAX_MIGRATION_BLOCK_REASON_LENGTH,
     emptyState,
     normalizeState,
     createGroup,
@@ -336,6 +422,7 @@
     toggleGroup,
     assignThread,
     unassignThreads,
+    blockThreadMigrations,
     syncThreadIdentities,
     deleteGroup,
     isTransientThreadId,

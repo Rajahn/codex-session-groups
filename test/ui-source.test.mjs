@@ -30,7 +30,11 @@ test("only removes visual membership after an explicit native archive disappears
   assert.match(source, /if \(!threadExistsAnywhere\(pending\.observedThreadId\)\)/);
   assert.match(source, /model\.unassignThreads/);
   assert.match(source, /rekeyPendingMembershipChecks/);
-  assert.match(source, /transientMembershipContextForRow/);
+  assert.match(source, /transientAliasContextForRow/);
+  assert.match(source, /:scope > \.csg-drag-handle\[data-csg-thread-id\]/);
+  assert.match(source, /model\.blockThreadMigrations/);
+  assert.match(source, /ambiguous-archive-target/);
+  assert.doesNotMatch(source, /blockedTransientMigrations/);
   assert.doesNotMatch(source, /scheduleMissingMembershipReconciliation/);
   assert.doesNotMatch(source, /set_thread_archived|setThreadArchived/);
 });
@@ -53,6 +57,10 @@ test("upgrades temporary thread ids only through the model's guarded identity sy
 test("fails open when Codex has not loaded saved group members", () => {
   assert.match(source, /analyzeProjectAvailability/);
   assert.match(source, /availability\.incomplete/);
+  assert.match(source, /restoreManagedThreadRows/);
+  assert.match(source, /restoreOrphanedManagedThreadRows/);
+  assert.match(source, /data-csg-managed-thread-row/);
+  assert.match(source, /data-csg-managed-thread-wrapper/);
   assert.match(source, /nativeRows\.forEach\(\(\{ row, wrapper \}\) => restoreThreadRow/);
   assert.match(source, /项目列表可见/);
   assert.match(source, /当前暂不折叠项目列表/);
