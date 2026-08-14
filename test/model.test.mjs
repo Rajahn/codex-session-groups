@@ -27,7 +27,7 @@ test("replaces an older injected model implementation", () => {
     },
   });
   vm.runInContext(source, staleContext);
-  assert.equal(staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.IMPLEMENTATION_VERSION, "0.1.7");
+  assert.equal(staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.IMPLEMENTATION_VERSION, "0.1.9");
   assert.equal(typeof staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.unassignThreads, "function");
 });
 
@@ -41,7 +41,7 @@ test("replaces a same-version model that lacks durable migration blocks", () => 
     globalThis: {
       __CODEX_SESSION_GROUPS_MODEL_V1__: Object.freeze({
         VERSION: 1,
-        IMPLEMENTATION_VERSION: "0.1.7",
+        IMPLEMENTATION_VERSION: "0.1.9",
       }),
     },
   });
@@ -53,7 +53,7 @@ test("replaces a same-version model that lacks durable migration blocks", () => 
 });
 
 test("normalizes malformed state without retaining invalid memberships", () => {
-  assert.equal(model.IMPLEMENTATION_VERSION, "0.1.7");
+  assert.equal(model.IMPLEMENTATION_VERSION, "0.1.9");
   const state = model.normalizeState({
     projects: {
       project: {

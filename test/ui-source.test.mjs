@@ -67,24 +67,19 @@ test("upgrades temporary thread ids only through the model's guarded identity sy
   assert.doesNotMatch(source, /querySelector.*client-new-thread/);
 });
 
-test("fails open when Codex has not loaded saved group members", () => {
-  assert.match(source, /analyzeProjectAvailability/);
-  assert.match(source, /availability\.incomplete/);
+test("projects groups from only the native rows Codex currently renders", () => {
+  assert.match(source, /summarizeVisibleGroupRows/);
+  assert.match(source, /summary\.visible > 0 \? String\(summary\.visible\) : ""/);
+  assert.match(source, /当前可见/);
   assert.match(source, /restoreManagedThreadRows/);
   assert.match(source, /restoreOrphanedManagedThreadRows/);
   assert.match(source, /data-csg-managed-thread-row/);
   assert.match(source, /data-csg-managed-thread-wrapper/);
-  assert.match(source, /nativeRows\.forEach\(\(\{ row, wrapper \}\) => restoreThreadRow/);
-  assert.match(source, /项目列表可见/);
-  assert.match(source, /当前暂不折叠项目列表/);
-});
-
-test("reveal retries are scoped to the current list signature", () => {
-  assert.match(source, /groupRevealSignature/);
-  assert.match(source, /currentList !== run\.list/);
-  assert.match(source, /groupRevealRuns/);
-  assert.doesNotMatch(source, /attemptedGroupReveals/);
-  assert.match(source, /scheduleProjectMembersReveal/);
+  assert.match(source, /assignedGroup\?\.collapsed/);
+  assert.doesNotMatch(source, /groupRevealRuns/);
+  assert.doesNotMatch(source, /scheduleProjectMembersReveal/);
+  assert.doesNotMatch(source, /SHOW_ALL_LABEL_PATTERN/);
+  assert.doesNotMatch(source, /REVEAL_SELF_HEAL_DELAY_MS/);
 });
 
 test("prunes disconnected wrappers retained by previous list mounts", () => {

@@ -5,15 +5,13 @@
   const MODEL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
   const STORAGE_KEY = "codex-session-groups:v1";
   const STYLE_ID = "codex-session-groups-style-v1";
-  const VERSION = "0.1.7";
+  const VERSION = "0.1.9";
   const PROJECT_ROW_SELECTOR = "[data-app-action-sidebar-project-row]";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_ROW_SELECTOR = "[data-app-action-sidebar-thread-id]";
   const MANAGED_THREAD_ROW_SELECTOR = '[data-csg-managed-thread-row="true"]';
   const MANAGED_THREAD_WRAPPER_SELECTOR = '[data-csg-managed-thread-wrapper="true"]';
   const ARCHIVE_LABEL_PATTERN = /^(?:归档聊天|archive chat)$/i;
-  const SHOW_ALL_LABEL_PATTERN = /^(?:展开显示|show more|show all)$/i;
-  const MAX_PROJECT_REVEAL_CLICKS = 8;
   const CREATE_GROUP_CONTENT_CLASS = "flex w-full items-center gap-1.5";
   const CREATE_GROUP_ICON_CLASS = "icon-xs shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100";
   const CREATE_GROUP_LABEL_CLASS = "flex-1 min-w-0 truncate";
@@ -41,7 +39,6 @@
   const orphanedManagedWrappers = new WeakSet();
   const touchedOrderElements = new Set();
   const membershipChecks = new Map();
-  const groupRevealRuns = new Map();
 
   const folderIcon = `
     <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -284,7 +281,6 @@
       .csg-group-name-wrap { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; margin-inline-start: 3px; }
       .csg-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
       .csg-group-count { flex: 0 0 auto; color: var(--token-description-foreground, currentColor); font-size: 11px; opacity: .68; }
-      .csg-group-row[data-csg-incomplete="true"] .csg-group-count { color: var(--token-warning-foreground, #9a6700); opacity: 1; }
       .csg-group-menu-button { display: flex; width: 24px; height: 24px; flex: 0 0 24px; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--token-description-foreground, currentColor); opacity: 0; cursor: pointer; }
       .csg-group-menu-button svg { width: 18px; height: 18px; }
       .csg-group-row:hover .csg-group-menu-button, .csg-group-row:focus-within .csg-group-menu-button { opacity: 1; }
@@ -336,26 +332,22 @@
     return wrapper;
   }
 
-  function analyzeProjectAvailability(config, nativeRows) {
+  function summarizeVisibleGroupRows(config, nativeRows) {
     const ownIds = new Set(nativeRows.map(({ row }) => threadIdForRow(row)).filter(Boolean));
     const globalIds = new Set(threadRowsAnywhere().map(threadIdForRow).filter(Boolean));
     const groups = new Map();
-    let unresolvedCount = 0;
-
     for (const group of config.groups) {
       const memberIds = Object.entries(config.membership)
         .filter(([, assignedGroupId]) => assignedGroupId === group.id)
         .map(([threadId]) => threadId);
       const visible = memberIds.filter((threadId) => ownIds.has(threadId)).length;
       const external = memberIds.filter((threadId) => !ownIds.has(threadId) && globalIds.has(threadId)).length;
-      const unresolved = memberIds.length - visible - external;
-      unresolvedCount += unresolved;
-      groups.set(group.id, { total: memberIds.length, visible, external, unresolved });
+      groups.set(group.id, { visible, external });
     }
-    return { incomplete: unresolvedCount > 0, unresolvedCount, groups };
+    return { groups };
   }
 
-  function renderGroup(nativeProjectRow, stack, projectId, group, groupIndex, availability, forceOpen) {
+  function renderGroup(nativeProjectRow, stack, projectId, group, groupIndex, availability) {
     let wrapper = Array.from(stack.children).find(
       (child) => child.dataset?.csgProjectId === projectId && child.dataset?.csgGroupId === group.id,
     );
@@ -368,19 +360,12 @@
     const desiredClasses = `${nativeProjectRow.className} csg-group-row`;
     if (row.className !== desiredClasses) row.className = desiredClasses;
     wrapper.style.order = String(groupIndex * 10_000);
-    setAttribute(row, "aria-expanded", String(forceOpen || !group.collapsed));
-    const summary = availability || { total: 0, visible: 0, external: 0, unresolved: 0 };
-    const countText = summary.total === 0
-      ? ""
-      : summary.visible === summary.total ? String(summary.total) : `${summary.visible}/${summary.total}`;
-    const unavailable = summary.external + summary.unresolved;
-    setAttribute(row, "aria-label", unavailable > 0
-      ? `${group.name}，项目列表可见 ${summary.visible} 个，共 ${summary.total} 个会话`
-      : `${group.name}，${summary.total} 个会话`);
-    setAttribute(row, "data-csg-incomplete", String(summary.unresolved > 0));
-    if (summary.unresolved > 0) {
-      row.title = `Codex 尚未加载 ${summary.unresolved} 个分组会话；当前暂不折叠项目列表`;
-    } else if (summary.external > 0) {
+    const summary = availability || { visible: 0, external: 0 };
+    setAttribute(row, "aria-expanded", String(!group.collapsed));
+    const countText = summary.visible > 0 ? String(summary.visible) : "";
+    setAttribute(row, "aria-label", `${group.name}，当前可见 ${summary.visible} 个会话`);
+    row.removeAttribute("data-csg-incomplete");
+    if (summary.external > 0) {
       row.title = `${summary.external} 个分组会话位于项目列表外（可能已置顶）`;
     } else {
       row.title = group.collapsed ? "点击展开分组" : "点击收起分组";
@@ -495,10 +480,9 @@
 
     const identitySync = syncProjectThreadIdentities(projectId, list, nativeRows);
     if (identitySync.changed) config = projectConfig(projectId);
-    const availability = analyzeProjectAvailability(config, nativeRows);
+    const availability = summarizeVisibleGroupRows(config, nativeRows);
 
     if (config.groups.length === 0) {
-      resetProjectMembersReveal(projectId);
       Array.from(stack.querySelectorAll(":scope > .csg-group-item")).forEach((item) => item.remove());
       restoreManagedThreadRows(stack);
       nativeRows.forEach(({ row, wrapper }) => restoreThreadRow(row, wrapper));
@@ -516,25 +500,8 @@
         group,
         index,
         availability.groups.get(group.id),
-        availability.incomplete,
       );
     });
-    if (availability.incomplete || config.groups.some((group) => !group.collapsed)) {
-      scheduleProjectMembersReveal(projectId);
-    } else {
-      resetProjectMembersReveal(projectId);
-    }
-
-    if (availability.incomplete) {
-      restoreManagedThreadRows(stack);
-      nativeRows.forEach(({ row, wrapper }) => restoreThreadRow(row, wrapper));
-      Array.from(stack.children).forEach((child) => {
-        if (child.matches?.(".csg-group-item")) return;
-        if (originalOrders.has(child)) child.style.order = originalOrders.get(child);
-      });
-      return;
-    }
-
     nativeRows.forEach(({ row, wrapper }, nativeIndex) => {
       if (!originalOrders.has(wrapper)) originalOrders.set(wrapper, wrapper.style.order || "");
       touchedOrderElements.add(wrapper);
@@ -642,22 +609,7 @@
     return result.group;
   }
 
-  function projectHasUnresolvedMembers(projectId) {
-    const list = projectList(projectId);
-    const stack = listStack(list);
-    if (!stack) return false;
-    const nativeRows = Array.from(stack.querySelectorAll(THREAD_ROW_SELECTOR))
-      .map((row) => ({ row, wrapper: directThreadWrapper(row, stack) }))
-      .filter((entry) => entry.wrapper);
-    return analyzeProjectAvailability(projectConfig(projectId), nativeRows).incomplete;
-  }
-
   function toggleGroupFromInteraction(projectId, groupId, forcedCollapsed) {
-    if (projectHasUnresolvedMembers(projectId)) {
-      scheduleProjectMembersReveal(projectId);
-      showToast("Codex 尚未加载全部分组会话；当前保持展开且不修改折叠状态");
-      return null;
-    }
     return toggleGroup(projectId, groupId, forcedCollapsed);
   }
 
@@ -708,7 +660,7 @@
     const result = model.unassignThreads(state, projectId, [threadId]);
     if (result.threadIds.length === 0) return false;
     saveState(result.state);
-    scheduleProjectMembersReveal(projectId);
+    scheduleRender();
     return true;
   }
 
@@ -744,153 +696,6 @@
     membershipChecks.set(key, pending);
   }
 
-  function showAllControl(list) {
-    return Array.from(list?.querySelectorAll?.("button,[role='button']") || []).find((candidate) => {
-      if (candidate.closest(
-        ".csg-group-item,.csg-group-row,[data-csg-managed-thread-row='true'],[data-csg-managed-thread-wrapper='true']",
-      )) return false;
-      if (candidate.closest(THREAD_ROW_SELECTOR)) return false;
-      if (candidate.matches(":disabled,[disabled]") || candidate.closest("[aria-disabled='true']")) return false;
-      if (candidate.closest("[hidden],[aria-hidden='true']")) return false;
-      for (let node = candidate; node && node !== list; node = node.parentElement) {
-        if (node.style?.display === "none" || node.style?.visibility === "hidden") return false;
-        const computed = globalThis.getComputedStyle?.(node);
-        if (computed?.display === "none" || computed?.visibility === "hidden") return false;
-      }
-      const labels = [candidate.textContent?.trim(), candidate.getAttribute("aria-label")?.trim()].filter(Boolean);
-      return labels.some((label) => SHOW_ALL_LABEL_PATTERN.test(label));
-    }) || null;
-  }
-
-  function projectThreadIds(list) {
-    return new Set(Array.from(list?.querySelectorAll?.(THREAD_ROW_SELECTOR) || [])
-      .map(threadIdForRow)
-      .filter(Boolean));
-  }
-
-  function threadIdSetSignature(ids) {
-    return Array.from(ids).sort().join("\u0000");
-  }
-
-  function revealPageSignature(ids, unresolvedIds) {
-    return `${threadIdSetSignature(ids)}\u0001${threadIdSetSignature(unresolvedIds)}`;
-  }
-
-  function strictlyExpandsThreadIds(previousIds, currentIds) {
-    return currentIds.size > previousIds.size
-      && Array.from(previousIds).every((threadId) => currentIds.has(threadId));
-  }
-
-  function unresolvedProjectMemberIds(projectId) {
-    return new Set(Object.keys(projectConfig(projectId).membership)
-      .filter((threadId) => !threadExistsAnywhere(threadId)));
-  }
-
-  function groupRevealSignature(projectId, list) {
-    const ids = projectThreadIds(list);
-    const unresolvedIds = unresolvedProjectMemberIds(projectId);
-    const hasShowAllControl = Boolean(showAllControl(list));
-    return `${list?.getAttribute("data-app-action-sidebar-project-show-all") || ""}\u0000${hasShowAllControl}\u0000${revealPageSignature(ids, unresolvedIds)}`;
-  }
-
-  function ensureProjectMembersRendered(projectId, allowClick) {
-    const config = projectConfig(projectId);
-    const list = projectList(projectId);
-    if (!list || config.groups.length === 0) return { status: "complete", unresolvedIds: [] };
-
-    const memberIds = Object.keys(config.membership);
-    const missingIds = memberIds.filter((threadId) => !threadExistsAnywhere(threadId));
-    if (missingIds.length === 0) return { status: "complete", unresolvedIds: [] };
-
-    const control = showAllControl(list);
-    if (control) {
-      if (!allowClick) return { status: "wait", unresolvedIds: missingIds };
-      control.click();
-      window.setTimeout(scheduleRender, 0);
-      return { status: "clicked", unresolvedIds: missingIds };
-    }
-    if (list.getAttribute("data-app-action-sidebar-project-show-all") !== "false") {
-      return { status: "incomplete", unresolvedIds: missingIds };
-    }
-    return { status: "wait", unresolvedIds: missingIds };
-  }
-
-  function scheduleProjectMembersReveal(projectId) {
-    const key = projectId;
-    const list = projectList(projectId);
-    if (!list) {
-      const existing = groupRevealRuns.get(key);
-      if (existing) {
-        window.clearTimeout(existing.timer);
-        existing.timer = 0;
-        existing.list = null;
-      }
-      return;
-    }
-    const signature = groupRevealSignature(projectId, list);
-    const existing = groupRevealRuns.get(key);
-    if (existing?.list === list && existing.signature === signature) return;
-    if (existing) window.clearTimeout(existing.timer);
-    const ids = projectThreadIds(list);
-    const unresolvedIds = unresolvedProjectMemberIds(projectId);
-    const phase = unresolvedIds.size > 0 ? "incomplete" : "complete";
-    const startsNewIncompleteChain = Boolean(existing)
-      && existing.phase === "complete"
-      && phase === "incomplete";
-    const continuesChain = Boolean(existing) && !startsNewIncompleteChain;
-    const clickedRowSignatures = continuesChain ? existing.clickedRowSignatures : new Set();
-    const clickCount = continuesChain ? existing.clickCount : 0;
-    let halted = continuesChain ? existing.halted : false;
-    if (continuesChain && existing.clicked
-      && !strictlyExpandsThreadIds(existing.ids, ids)) halted = true;
-    if (clickCount >= MAX_PROJECT_REVEAL_CLICKS) halted = true;
-    const run = {
-      list,
-      signature,
-      ids,
-      unresolvedIds,
-      phase,
-      attempts: 0,
-      clicked: false,
-      clickedRowSignatures,
-      clickCount,
-      halted,
-      timer: 0,
-    };
-    const reveal = () => {
-      if (groupRevealRuns.get(key) !== run) return;
-      const currentList = projectList(projectId);
-      if (currentList !== run.list || groupRevealSignature(projectId, currentList) !== run.signature) {
-        scheduleRender();
-        return;
-      }
-      const rowSignature = revealPageSignature(run.ids, run.unresolvedIds);
-      const allowClick = !run.halted
-        && !run.clicked
-        && run.clickCount < MAX_PROJECT_REVEAL_CLICKS
-        && !run.clickedRowSignatures.has(rowSignature);
-      const result = ensureProjectMembersRendered(projectId, allowClick);
-      run.attempts += 1;
-      if (result.status === "clicked") {
-        run.clicked = true;
-        run.clickCount += 1;
-        run.clickedRowSignatures.add(rowSignature);
-      }
-      if (["complete", "incomplete"].includes(result.status)) return;
-      if (run.attempts >= 5) return;
-      run.timer = window.setTimeout(reveal, run.attempts * 200);
-    };
-    run.timer = window.setTimeout(reveal, 0);
-    groupRevealRuns.set(key, run);
-  }
-
-  function resetProjectMembersReveal(projectId) {
-    const key = projectId;
-    const run = groupRevealRuns.get(key);
-    if (run) window.clearTimeout(run.timer);
-    groupRevealRuns.delete(key);
-  }
-
   function scheduleRender() {
     if (destroyed || renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
@@ -903,12 +708,6 @@
     restoreOrphanedManagedThreadRows(document);
     touchedOrderElements.forEach((element) => {
       if (!element?.isConnected) touchedOrderElements.delete(element);
-    });
-    groupRevealRuns.forEach((run, key) => {
-      if (!run.list || run.list.isConnected) return;
-      window.clearTimeout(run.timer);
-      run.timer = 0;
-      run.list = null;
     });
   }
 
@@ -1310,8 +1109,6 @@
     window.clearTimeout(toastTimer);
     membershipChecks.forEach(({ timer }) => window.clearTimeout(timer));
     membershipChecks.clear();
-    groupRevealRuns.forEach((run) => window.clearTimeout(run.timer));
-    groupRevealRuns.clear();
     document.querySelector(".csg-toast")?.remove();
     document.getElementById(STYLE_ID)?.remove();
     document.querySelectorAll(".csg-group-item").forEach((item) => item.remove());
@@ -1391,7 +1188,6 @@
     toggleGroup,
     getDiagnostics: () => ({
       membershipChecks: membershipChecks.size,
-      groupRevealRuns: groupRevealRuns.size,
       touchedOrderElements: touchedOrderElements.size,
     }),
     refresh: render,
