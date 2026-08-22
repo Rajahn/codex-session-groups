@@ -27,11 +27,11 @@ test("replaces an older injected model implementation", () => {
     },
   });
   vm.runInContext(source, staleContext);
-  assert.equal(staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.IMPLEMENTATION_VERSION, "0.1.9");
+  assert.equal(staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.IMPLEMENTATION_VERSION, "0.1.10");
   assert.equal(typeof staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.unassignThreads, "function");
 });
 
-test("replaces a same-version model that lacks durable migration blocks", () => {
+test("replaces a same-version model that lacks exact identity migration", () => {
   const staleContext = vm.createContext({
     Date,
     Math,
@@ -41,19 +41,19 @@ test("replaces a same-version model that lacks durable migration blocks", () => 
     globalThis: {
       __CODEX_SESSION_GROUPS_MODEL_V1__: Object.freeze({
         VERSION: 1,
-        IMPLEMENTATION_VERSION: "0.1.9",
+        IMPLEMENTATION_VERSION: "0.1.10",
       }),
     },
   });
   vm.runInContext(source, staleContext);
   assert.equal(
-    typeof staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.blockThreadMigrations,
+    typeof staleContext.globalThis.__CODEX_SESSION_GROUPS_MODEL_V1__.migrateThreadIdentity,
     "function",
   );
 });
 
 test("normalizes malformed state without retaining invalid memberships", () => {
-  assert.equal(model.IMPLEMENTATION_VERSION, "0.1.9");
+  assert.equal(model.IMPLEMENTATION_VERSION, "0.1.10");
   const state = model.normalizeState({
     projects: {
       project: {
@@ -159,6 +159,53 @@ test("migrates a uniquely matched temporary thread id after restart", () => {
     "local:stable-1": "group-a",
   });
   assert.equal(result.state.projects.project.threadHints["local:stable-1"].title, "分析商责单延迟写入原因");
+});
+
+test("migrates exact same-row lineage without relying on list completeness", () => {
+  const temporaryId = "local:client-new-thread:exact";
+  const stableId = "local:stable-exact";
+  const hint = { title: "Exact task", hostId: "local", kind: "local" };
+  let state = model.createGroup(model.emptyState(), "project", "A", "group-a").state;
+  state = model.assignThread(state, "project", temporaryId, "group-a", hint).state;
+  state = model.blockThreadMigrations(state, "project", [temporaryId], "ambiguous-source-targets").state;
+
+  const migrated = model.migrateThreadIdentity(state, "project", temporaryId, stableId, hint);
+  assert.equal(migrated.changed, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(migrated.migration)), {
+    fromThreadId: temporaryId,
+    toThreadId: stableId,
+    groupId: "group-a",
+  });
+  assert.equal(migrated.state.projects.project.membership[temporaryId], undefined);
+  assert.equal(migrated.state.projects.project.membership[stableId], "group-a");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(migrated.state.projects.project.threadHints[stableId])),
+    hint,
+  );
+  assert.equal(migrated.state.projects.project.migrationBlocks[temporaryId], undefined);
+
+  for (const [sourceId, targetId, targetHint] of [
+    [temporaryId, "local:wrong-hint", { ...hint, title: "Other" }],
+    ["local:already-stable", "local:new-stable", hint],
+    [temporaryId, "local:client-new-thread:still-temporary", hint],
+  ]) {
+    const rejected = model.migrateThreadIdentity(state, "project", sourceId, targetId, targetHint);
+    assert.equal(rejected.changed, false);
+    assert.equal(rejected.migration, null);
+    assert.equal(rejected.state.projects.project.membership[temporaryId], "group-a");
+  }
+
+  const occupied = model.assignThread(state, "project", stableId, "group-a", hint).state;
+  const rejectedOccupied = model.migrateThreadIdentity(
+    occupied,
+    "project",
+    temporaryId,
+    stableId,
+    hint,
+  );
+  assert.equal(rejectedOccupied.changed, false);
+  assert.equal(rejectedOccupied.state.projects.project.membership[temporaryId], "group-a");
+  assert.equal(rejectedOccupied.state.projects.project.membership[stableId], "group-a");
 });
 
 test("does not guess a new id when the title match is ambiguous or the list is partial", () => {

@@ -2,14 +2,15 @@
   "use strict";
 
   const GLOBAL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
-  const IMPLEMENTATION_VERSION = "0.1.9";
+  const IMPLEMENTATION_VERSION = "0.1.10";
   const VERSION = 1;
   const MAX_NAME_LENGTH = 60;
   const MAX_THREAD_TITLE_LENGTH = 500;
   const MAX_MIGRATION_BLOCK_REASON_LENGTH = 120;
 
   if (globalThis[GLOBAL_KEY]?.IMPLEMENTATION_VERSION === IMPLEMENTATION_VERSION
-    && typeof globalThis[GLOBAL_KEY]?.blockThreadMigrations === "function") return;
+    && typeof globalThis[GLOBAL_KEY]?.blockThreadMigrations === "function"
+    && typeof globalThis[GLOBAL_KEY]?.migrateThreadIdentity === "function") return;
 
   function dictionary() {
     return Object.create(null);
@@ -285,6 +286,36 @@
     return { state: normalized, threadIds: blocked };
   }
 
+  function migrateThreadIdentity(state, projectId, fromThreadId, toThreadId, hintValue) {
+    const copy = projectCopy(state, projectId);
+    const sourceId = text(fromThreadId);
+    const targetId = text(toThreadId);
+    const targetHint = threadHint(hintValue);
+    const groupId = copy.project.membership[sourceId] || "";
+    if (!sourceId
+      || !targetId
+      || sourceId === targetId
+      || !isTransientThreadId(sourceId)
+      || isTransientThreadId(targetId)
+      || !groupId
+      || !targetHint
+      || !sameThreadHint(copy.project.threadHints[sourceId], targetHint)
+      || Object.hasOwn(copy.project.membership, targetId)) {
+      return { state: copy.state, changed: false, migration: null };
+    }
+
+    delete copy.project.membership[sourceId];
+    delete copy.project.threadHints[sourceId];
+    delete copy.project.migrationBlocks[sourceId];
+    copy.project.membership[targetId] = groupId;
+    copy.project.threadHints[targetId] = targetHint;
+    return {
+      state: copy.state,
+      changed: true,
+      migration: { fromThreadId: sourceId, toThreadId: targetId, groupId },
+    };
+  }
+
   function syncThreadIdentities(state, projectId, renderedThreads, allowMigration = false) {
     const copy = projectCopy(state, projectId);
     const descriptors = [];
@@ -423,6 +454,7 @@
     assignThread,
     unassignThreads,
     blockThreadMigrations,
+    migrateThreadIdentity,
     syncThreadIdentities,
     deleteGroup,
     isTransientThreadId,

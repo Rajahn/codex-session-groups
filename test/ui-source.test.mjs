@@ -58,8 +58,9 @@ test("a newer injection takes over an older renderer script", () => {
   assert.match(source, /model\.IMPLEMENTATION_VERSION !== VERSION/);
 });
 
-test("upgrades temporary thread ids only through the model's guarded identity sync", () => {
+test("upgrades temporary thread ids through exact lineage or guarded fingerprint sync", () => {
   assert.match(source, /threadDescriptorForRow/);
+  assert.match(source, /model\.migrateThreadIdentity/);
   assert.match(source, /model\.syncThreadIdentities/);
   assert.match(source, /project-show-all["']\) === ["']true/);
   assert.match(source, /data-app-action-sidebar-thread-title/);

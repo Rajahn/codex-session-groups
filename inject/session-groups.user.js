@@ -5,7 +5,7 @@
   const MODEL_KEY = "__CODEX_SESSION_GROUPS_MODEL_V1__";
   const STORAGE_KEY = "codex-session-groups:v1";
   const STYLE_ID = "codex-session-groups-style-v1";
-  const VERSION = "0.1.9";
+  const VERSION = "0.1.10";
   const PROJECT_ROW_SELECTOR = "[data-app-action-sidebar-project-row]";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_ROW_SELECTOR = "[data-app-action-sidebar-thread-id]";
@@ -236,6 +236,26 @@
   }
 
   function syncProjectThreadIdentities(projectId, list, nativeRows) {
+    let nextState = state;
+    let changed = false;
+    const migrations = [];
+    for (const { row } of nativeRows) {
+      const alias = transientAliasContextForRow(row, projectId);
+      const descriptor = threadDescriptorForRow(row);
+      if (!alias || !descriptor) continue;
+      const result = model.migrateThreadIdentity(
+        nextState,
+        projectId,
+        alias.threadId,
+        descriptor.id,
+        descriptor,
+      );
+      nextState = result.state;
+      if (!result.changed) continue;
+      changed = true;
+      migrations.push(result.migration);
+    }
+
     const ownRows = new Set(nativeRows.map(({ row }) => row));
     const descriptors = [
       ...nativeRows.map(({ row }) => ({ ...threadDescriptorForRow(row), migrationTarget: true })),
@@ -244,16 +264,19 @@
         .map((row) => ({ ...threadDescriptorForRow(row), migrationTarget: false })),
     ].filter((descriptor) => descriptor.id && descriptor.title);
     const renderedIds = new Set(descriptors.map(({ id }) => id));
-    const hasMissingStableMembership = Object.keys(projectConfig(projectId).membership).some(
+    const currentMembership = nextState.projects[projectId]?.membership || {};
+    const hasMissingStableMembership = Object.keys(currentMembership).some(
       (threadId) => !model.isTransientThreadId(threadId) && !renderedIds.has(threadId),
     );
     const allowMigration = !hasMissingStableMembership
       && list?.getAttribute("data-app-action-sidebar-project-show-all") === "true";
-    const result = model.syncThreadIdentities(state, projectId, descriptors, allowMigration);
-    if (!result.changed) return result;
-    rekeyPendingMembershipChecks(projectId, result.migrations);
+    const result = model.syncThreadIdentities(nextState, projectId, descriptors, allowMigration);
+    changed ||= result.changed;
+    migrations.push(...result.migrations);
+    if (!changed) return { ...result, migrations };
+    rekeyPendingMembershipChecks(projectId, migrations);
     saveState(result.state);
-    return result;
+    return { ...result, changed, migrations };
   }
 
   function setAttribute(node, name, value) {

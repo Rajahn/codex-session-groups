@@ -464,6 +464,37 @@ test("a remounted native list projects only the rows Codex currently renders", a
   first.window.close();
 });
 
+test("same-row temporary id migration works while other saved members are not rendered", async () => {
+  const temporary = descriptor("local:client-new-thread:exact-visible", "Exact visible task");
+  const stable = descriptor("local:stable-exact-visible", "Exact visible task");
+  const missing = descriptor("local:stable-not-rendered", "Saved but not rendered");
+  let showAllClicks = 0;
+  const { window, stack } = boot([temporary, missing], [temporary], {
+    showAll: "false",
+    onShowAll: () => { showAllClicks += 1; },
+  });
+  await delay();
+
+  const row = stack.querySelector(`[data-app-action-sidebar-thread-id="${temporary.id}"]`);
+  assert.equal(row.dataset.csgProjectId, projectId);
+  assert.equal(row.dataset.csgGroupId, groupId);
+  assert.equal(row.querySelector(":scope > .csg-drag-handle").dataset.csgThreadId, temporary.id);
+
+  row.setAttribute("data-app-action-sidebar-thread-id", stable.id);
+  api(window).refresh();
+  await waitFor(() => api(window).getState().projects[projectId].membership[stable.id] === groupId);
+
+  const state = api(window).getState().projects[projectId];
+  assert.equal(state.membership[temporary.id], undefined);
+  assert.equal(state.membership[stable.id], groupId);
+  assert.equal(state.membership[missing.id], groupId);
+  assert.equal(stack.querySelector(".csg-group-count").textContent, "1");
+  assert.equal(row.querySelector(":scope > .csg-drag-handle").dataset.csgThreadId, stable.id);
+  assert.equal(showAllClicks, 0);
+  api(window).destroy();
+  window.close();
+});
+
 test("archive reconciliation follows a temporary id migration", async () => {
   const temporary = descriptor("local:client-new-thread:temp", "Migrating task");
   const stable = descriptor("local:stable", "Migrating task");
